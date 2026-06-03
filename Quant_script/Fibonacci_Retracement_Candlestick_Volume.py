@@ -66,9 +66,15 @@ def _load_symbols_from_csv_urls(
 
 def load_sec_list_symbols() -> List[str]:
 	base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-	csv_path = os.path.join(base_dir, "sec_list.csv")
-	if not os.path.exists(csv_path):
-		raise RuntimeError(f"Unable to find sec_list.csv at {csv_path}")
+	candidate_paths = [
+		os.path.join(base_dir, "Data", "sec_list.csv"),
+		os.path.join(base_dir, "sec_list.csv"),
+	]
+	csv_path = next((path for path in candidate_paths if os.path.exists(path)), None)
+	if csv_path is None:
+		raise RuntimeError(
+			"Unable to find sec_list.csv. Looked in: " + ", ".join(candidate_paths)
+		)
 
 	raw = pd.read_csv(
 		csv_path,

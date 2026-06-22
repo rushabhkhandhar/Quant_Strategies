@@ -20,6 +20,12 @@ class CandleSet:
 
 _BHAVCOPY_CACHE: Dict[str, Optional[pd.DataFrame]] = {}
 
+# ---------------------------------------------------------------------------
+# Liquidity threshold: Volume × Close Price >= 70 Crore (₹700,000,000)
+# ---------------------------------------------------------------------------
+LIQUIDITY_THRESHOLD_CRORE = 70
+LIQUIDITY_THRESHOLD = LIQUIDITY_THRESHOLD_CRORE * 1_00_00_000  # 70 Cr in INR
+
 
 def _load_symbols_from_csv_urls(
 	urls: Sequence[str],
@@ -223,6 +229,13 @@ def fetch_daily_candles(symbol: str, as_of_date: date) -> Optional[CandleSet]:
 		return None
 
 	return CandleSet(daily=daily)
+
+
+def is_liquid(daily: pd.DataFrame) -> bool:
+	"""Return True if the most recent candle has Volume × Close >= 100 Crore."""
+	last = daily.iloc[-1]
+	traded_value = float(last["Volume"]) * float(last["Close"])
+	return traded_value >= LIQUIDITY_THRESHOLD
 
 
 def build_tradingview_link(symbol: str) -> str:
@@ -588,6 +601,17 @@ def _process_symbol(
 	if candles is None:
 		return None, f"{symbol}: SKIPPED (no_data)" if verbose else None
 
+	# ------------------------------------------------------------------
+	# Liquidity filter: Volume × Close must be >= 100 Crore on last day
+	# ------------------------------------------------------------------
+	if not is_liquid(candles.daily):
+		last = candles.daily.iloc[-1]
+		traded_value_cr = (float(last["Volume"]) * float(last["Close"])) / 1_00_00_000
+		return None, (
+			f"{symbol}: SKIPPED (low_liquidity {traded_value_cr:.1f} Cr < {LIQUIDITY_THRESHOLD_CRORE} Cr)"
+			if verbose else None
+		)
+
 	signal = fibonacci_bounce_tomorrow_signal(
 		candles.daily,
 		swing_lookback=swing_lookback,
@@ -757,6 +781,7 @@ def main() -> None:
 	universe_loader = load_sec_list_symbols
 	symbols = universe_loader()
 	print(f"Running on all {universe_name} symbols: {len(symbols)}")
+	print(f"Liquidity filter: Volume × Close >= {LIQUIDITY_THRESHOLD_CRORE} Crore")
 
 	output_dir = get_output_dir()
 	swing_lookback = 60

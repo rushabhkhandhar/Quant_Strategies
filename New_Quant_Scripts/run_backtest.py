@@ -8,9 +8,11 @@ from backtest.ensemble_engine import EnsembleBacktestEngine
 from data.nse_fetcher import load_nifty500_symbols
 from strategies.base import BaseStrategy
 from strategies.rubber_band import RubberBandStrategy
+from strategies.fibonacci_bounce import FibonacciBounceStrategy
 
 STRATEGY_MAP = {
-    "Rubber_Band_Mean_Reversion": RubberBandStrategy
+    "Rubber_Band_Mean_Reversion": RubberBandStrategy,
+    "Fibonacci_Retracement_Bounce": FibonacciBounceStrategy
 }
 
 def main():
@@ -19,11 +21,11 @@ def main():
     strategies = list(STRATEGY_MAP.keys())
     for idx, s_name in enumerate(strategies, 1):
         print(f"{idx}. {s_name}")
-    print("2. All Strategies (Ensemble Portfolio)")
+    print("3. All Strategies (Ensemble Portfolio)")
         
     strat_idx = input("\nSelect strategy number: ").strip()
     
-    if strat_idx != "2":
+    if strat_idx != "3":
         try:
             selected_strategy = strategies[int(strat_idx) - 1]
         except (ValueError, IndexError):

@@ -8,10 +8,8 @@ from urllib.parse import quote
 from data.nse_fetcher import load_nifty500_symbols, fetch_daily_candles
 from core.models import CandleSet, Signal
 from strategies.base import BaseStrategy
-from strategies.vcp_breakout import VCPBreakoutStrategy
-from strategies.holy_grail import HolyGrailStrategy
 from strategies.rubber_band import RubberBandStrategy
-from strategies.inside_day_squeeze import InsideDaySqueezeStrategy
+from strategies.fibonacci_bounce import FibonacciBounceStrategy
 
 # Liquidity threshold: 20-Day Average (Volume * Close) >= 70 Crore
 LIQUIDITY_THRESHOLD = 70 * 1_00_00_000
@@ -43,10 +41,8 @@ def run_screener(as_of_date: date):
     
     # 1. Initialize all strategies
     strategies: List[BaseStrategy] = [
-        VCPBreakoutStrategy(),
-        HolyGrailStrategy(),
         RubberBandStrategy(),
-        InsideDaySqueezeStrategy(),
+        FibonacciBounceStrategy(),
     ]
     
     outputs_dir = setup_output_dirs(strategies)

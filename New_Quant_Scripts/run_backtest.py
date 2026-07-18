@@ -4,6 +4,7 @@ from datetime import datetime, date
 import pandas as pd
 
 from backtest.engine import BacktestEngine
+from backtest.ensemble_engine import EnsembleBacktestEngine
 from data.nse_fetcher import load_nifty500_symbols
 from strategies.base import BaseStrategy
 from strategies.vcp_breakout import VCPBreakoutStrategy
@@ -24,13 +25,18 @@ def main():
     strategies = list(STRATEGY_MAP.keys())
     for idx, s_name in enumerate(strategies, 1):
         print(f"{idx}. {s_name}")
+    print("5. All Strategies (Ensemble Portfolio)")
         
     strat_idx = input("\nSelect strategy number: ").strip()
-    try:
-        selected_strategy = strategies[int(strat_idx) - 1]
-    except (ValueError, IndexError):
-        print("Invalid selection. Exiting.")
-        return
+    
+    if strat_idx != "5":
+        try:
+            selected_strategy = strategies[int(strat_idx) - 1]
+        except (ValueError, IndexError):
+            print("Invalid selection. Exiting.")
+            return
+    else:
+        selected_strategy = "Ensemble_Portfolio"
         
     start_val = input("Enter start date (dd/mm/yyyy) [Default: 01/01/2024]: ").strip()
     end_val = input(f"Enter end date (dd/mm/yyyy) [Default: {datetime.today().strftime('%d/%m/%Y')}]: ").strip()
@@ -43,18 +49,20 @@ def main():
     start_date = datetime.strptime(start_val, "%d/%m/%Y").date()
     end_date = datetime.strptime(end_val, "%d/%m/%Y").date()
     
-    print(f"\n=== Individual Backtest: {selected_strategy} ===")
+    print(f"\n=== Backtest: {selected_strategy} ===")
     print(f"Period: {start_date} to {end_date}")
     
     print("Loading Universe...")
     symbols = load_nifty500_symbols()
-    # For quick testing, you can uncomment this to run on just 20 symbols:
-    # symbols = symbols[:20] 
     
-    strategy_cls = STRATEGY_MAP[selected_strategy]
-    strategy_instance = strategy_cls()
-    
-    engine = BacktestEngine(strategy_instance, symbols, start_date, end_date)
+    if strat_idx == "5":
+        strategy_instances = [cls() for cls in STRATEGY_MAP.values()]
+        engine = EnsembleBacktestEngine(strategy_instances, symbols, start_date, end_date)
+    else:
+        strategy_cls = STRATEGY_MAP[selected_strategy]
+        strategy_instance = strategy_cls()
+        engine = BacktestEngine(strategy_instance, symbols, start_date, end_date)
+        
     metrics = engine.run()
     
     if not metrics:

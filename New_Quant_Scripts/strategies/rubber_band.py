@@ -102,6 +102,7 @@ class RubberBandStrategy(BaseStrategy):
             metadata={
                 "Close": round(curr_close, 2),
                 "Deviation_%": round(deviation_pct, 2),
-                "RSI_14": round(curr_rsi, 2)
+                "RSI_14": round(curr_rsi, 2),
+                "rank_score": -curr_rsi
             }
         )

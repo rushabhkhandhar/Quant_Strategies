@@ -94,6 +94,7 @@ class InsideDaySqueezeStrategy(BaseStrategy):
             metadata={
                 "Close": round(curr_close, 2),
                 "BB_Width_%": round(bb_width_pct, 2),
-                "Inside_Day": "Yes"
+                "Inside_Day": "Yes",
+                "rank_score": -bb_width_pct
             }
         )

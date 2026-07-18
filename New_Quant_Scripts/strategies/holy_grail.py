@@ -148,8 +148,9 @@ class HolyGrailStrategy(BaseStrategy):
             stop_loss=stop_loss,
             targets={"T1 (2R)": target_1, "T2 (3R)": target_2},
             metadata={
-                "Close": round(float(curr_row["Close"]), 2),
                 "ADX": round(curr_adx, 2),
-                "EMA_20": round(curr_ema_20, 2)
+                "EMA_20": round(curr_ema_20, 2),
+                "Pullback_Low": round(float(prev_row["Low"]), 2),
+                "rank_score": curr_adx
             }
         )

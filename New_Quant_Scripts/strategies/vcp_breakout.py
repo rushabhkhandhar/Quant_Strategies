@@ -105,6 +105,7 @@ class VCPBreakoutStrategy(BaseStrategy):
                 "Close": round(curr_close, 2),
                 "Base_Depth_Pct": round(base_depth_pct, 2),
                 "Vol_10_vs_50": round(vol_10 / vol_50, 2),
-                "Resistance": round(max_high, 2)
+                "Resistance": round(max_high, 2),
+                "rank_score": -base_depth_pct
             }
         )

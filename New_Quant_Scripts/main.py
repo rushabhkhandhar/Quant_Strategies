@@ -11,6 +11,7 @@ from strategies.base import BaseStrategy
 from strategies.vcp_breakout import VCPBreakoutStrategy
 from strategies.holy_grail import HolyGrailStrategy
 from strategies.rubber_band import RubberBandStrategy
+from strategies.inside_day_squeeze import InsideDaySqueezeStrategy
 
 # Liquidity threshold: 20-Day Average (Volume * Close) >= 70 Crore
 LIQUIDITY_THRESHOLD = 70 * 1_00_00_000
@@ -45,6 +46,7 @@ def run_screener(as_of_date: date):
         VCPBreakoutStrategy(),
         HolyGrailStrategy(),
         RubberBandStrategy(),
+        InsideDaySqueezeStrategy(),
     ]
     
     outputs_dir = setup_output_dirs(strategies)

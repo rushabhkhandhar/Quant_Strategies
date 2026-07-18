@@ -5,6 +5,7 @@ from io import StringIO
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.request import Request, urlopen
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor
 
 from core.models import CandleSet
 
@@ -35,6 +36,40 @@ def _download_bhavcopy_for_date(trade_date: date) -> Optional[pd.DataFrame]:
         df = pd.read_csv(StringIO(content), engine="python", on_bad_lines="skip")
         df.columns = [str(c).strip().upper() for c in df.columns]
         
+        # PRE-PROCESS ONCE: Extract required columns and set index for O(1) lookups
+        symbol_col = _find_column(df.columns.tolist(), ["SYMBOL"])
+        series_col = _find_column(df.columns.tolist(), ["SERIES"])
+        open_col = _find_column(df.columns.tolist(), ["OPEN_PRICE", "OPEN"])
+        high_col = _find_column(df.columns.tolist(), ["HIGH_PRICE", "HIGH"])
+        low_col = _find_column(df.columns.tolist(), ["LOW_PRICE", "LOW"])
+        close_col = _find_column(df.columns.tolist(), ["CLOSE_PRICE", "CLOSE", "CLOSE_PRICE_"])
+        volume_col = _find_column(df.columns.tolist(), ["TOTTRDQTY", "TTL_TRD_QNTY", "VOLUME", "TOTTRD_QTY"])
+        
+        if not (symbol_col and series_col and open_col and high_col and low_col and close_col):
+            _BHAVCOPY_CACHE[key] = None
+            return None
+            
+        df[symbol_col] = df[symbol_col].astype(str).str.strip().str.upper()
+        df[series_col] = df[series_col].astype(str).str.strip().str.upper()
+        
+        # Filter EQ only
+        df = df[df[series_col] == "EQ"]
+        
+        # Rename and keep only necessary columns
+        rename_dict = {
+            open_col: "OPEN", high_col: "HIGH", low_col: "LOW", close_col: "CLOSE"
+        }
+        if volume_col:
+            rename_dict[volume_col] = "VOLUME"
+            
+        df = df.rename(columns=rename_dict)
+        if "VOLUME" not in df.columns:
+            df["VOLUME"] = 0.0
+            
+        # Set symbol as index for instant lookups
+        df = df.set_index(symbol_col)[["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]]
+        df = df.apply(pd.to_numeric, errors="coerce")
+        
         _BHAVCOPY_CACHE[key] = df
         return df
     except Exception:
@@ -53,57 +88,37 @@ def fetch_daily_candles(symbol: str, as_of_date: date, lookback_days: int = 320)
     """Fetch a history of daily candles for a given symbol up to as_of_date."""
     rows: List[Dict[str, Any]] = []
 
-    for offset in range(0, lookback_days + 1):
-        day = as_of_date - timedelta(days=offset)
+    # 1. Pre-fetch all missing days in parallel to drastically speed up network I/O
+    days_to_fetch = [as_of_date - timedelta(days=offset) for offset in range(lookback_days + 1)]
+    missing_days = [d for d in days_to_fetch if d.strftime("%Y-%m-%d") not in _BHAVCOPY_CACHE]
+    
+    if missing_days:
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            list(executor.map(_download_bhavcopy_for_date, missing_days))
+
+    # 2. Extract data sequentially (all requests will now instantly hit the RAM cache)
+    for day in days_to_fetch:
         df = _download_bhavcopy_for_date(day)
         if df is None or df.empty:
             continue
 
-        symbol_col = _find_column(df.columns.tolist(), ["SYMBOL"])
-        series_col = _find_column(df.columns.tolist(), ["SERIES"])
-        open_col = _find_column(df.columns.tolist(), ["OPEN_PRICE", "OPEN"])
-        high_col = _find_column(df.columns.tolist(), ["HIGH_PRICE", "HIGH"])
-        low_col = _find_column(df.columns.tolist(), ["LOW_PRICE", "LOW"])
-        close_col = _find_column(df.columns.tolist(), ["CLOSE_PRICE", "CLOSE", "CLOSE_PRICE_"])
-        volume_col = _find_column(df.columns.tolist(), ["TOTTRDQTY", "TTL_TRD_QNTY", "VOLUME", "TOTTRD_QTY"])
-        date_col = _find_column(df.columns.tolist(), ["DATE1", "DATE", "TIMESTAMP"])
-
-        if not (symbol_col and series_col and open_col and high_col and low_col and close_col and date_col):
-            continue
-
-        day_df = df.copy()
-        day_df[symbol_col] = day_df[symbol_col].astype(str).str.strip().str.upper()
-        day_df[series_col] = day_df[series_col].astype(str).str.strip().str.upper()
-        filtered = day_df[(day_df[symbol_col] == symbol) & (day_df[series_col] == "EQ")]
-        
-        if filtered.empty:
-            continue
-
-        r = filtered.iloc[0]
-        trade_date = pd.to_datetime(str(r[date_col]).strip(), errors="coerce", dayfirst=True)
-        if pd.isna(trade_date):
-            continue
-
-        ohlc = pd.to_numeric(r[[open_col, high_col, low_col, close_col]], errors="coerce")
-        if ohlc.isna().any():
-            continue
-
-        volume = 0.0
-        if volume_col:
-            vol = pd.to_numeric(pd.Series([r[volume_col]]), errors="coerce").iloc[0]
-            if not pd.isna(vol):
-                volume = float(vol)
-
-        rows.append(
-            {
-                "Date": trade_date,
-                "Open": float(ohlc.iloc[0]),
-                "High": float(ohlc.iloc[1]),
-                "Low": float(ohlc.iloc[2]),
-                "Close": float(ohlc.iloc[3]),
-                "Volume": volume,
-            }
-        )
+        if symbol in df.index:
+            r = df.loc[symbol]
+            # Some Bhavcopies have duplicate EQ entries accidentally, take the first one
+            if isinstance(r, pd.DataFrame):
+                r = r.iloc[0]
+                
+            if pd.isna(r["OPEN"]) or pd.isna(r["CLOSE"]):
+                continue
+                
+            rows.append({
+                "Date": pd.to_datetime(day),
+                "Open": float(r["OPEN"]),
+                "High": float(r["HIGH"]),
+                "Low": float(r["LOW"]),
+                "Close": float(r["CLOSE"]),
+                "Volume": float(r["VOLUME"]) if not pd.isna(r["VOLUME"]) else 0.0
+            })
 
     if not rows:
         return None

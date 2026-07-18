@@ -10,6 +10,7 @@ from core.models import CandleSet, Signal
 from strategies.base import BaseStrategy
 from strategies.rubber_band import RubberBandStrategy
 from strategies.fibonacci_bounce import FibonacciBounceStrategy
+from strategies.macd_bb import MacdBbStrategy
 
 # Liquidity threshold: 20-Day Average (Volume * Close) >= 70 Crore
 LIQUIDITY_THRESHOLD = 70 * 1_00_00_000
@@ -43,6 +44,7 @@ def run_screener(as_of_date: date):
     strategies: List[BaseStrategy] = [
         RubberBandStrategy(),
         FibonacciBounceStrategy(),
+        MacdBbStrategy(),
     ]
     
     outputs_dir = setup_output_dirs(strategies)

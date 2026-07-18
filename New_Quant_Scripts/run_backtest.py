@@ -9,10 +9,12 @@ from data.nse_fetcher import load_nifty500_symbols
 from strategies.base import BaseStrategy
 from strategies.rubber_band import RubberBandStrategy
 from strategies.fibonacci_bounce import FibonacciBounceStrategy
+from strategies.macd_bb import MacdBbStrategy
 
 STRATEGY_MAP = {
     "Rubber_Band_Mean_Reversion": RubberBandStrategy,
-    "Fibonacci_Retracement_Bounce": FibonacciBounceStrategy
+    "Fibonacci_Retracement_Bounce": FibonacciBounceStrategy,
+    "MACD_BB_Expansion": MacdBbStrategy
 }
 
 def main():
@@ -21,11 +23,11 @@ def main():
     strategies = list(STRATEGY_MAP.keys())
     for idx, s_name in enumerate(strategies, 1):
         print(f"{idx}. {s_name}")
-    print("3. All Strategies (Ensemble Portfolio)")
+    print("4. All Strategies (Ensemble Portfolio)")
         
     strat_idx = input("\nSelect strategy number: ").strip()
     
-    if strat_idx != "3":
+    if strat_idx != "4":
         try:
             selected_strategy = strategies[int(strat_idx) - 1]
         except (ValueError, IndexError):

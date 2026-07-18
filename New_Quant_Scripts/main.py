@@ -1,6 +1,6 @@
 import os
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 from typing import List
 from urllib.parse import quote
 
@@ -111,7 +111,15 @@ def run_screener(as_of_date: date):
         df_out.to_csv(out_file, index=False)
         print(f"\n[{strategy.name}] Found {len(signals)} setups! Saved to: {out_file}")
 
+def resolve_anchor_date() -> date:
+    user_value = input("Enter anchor date (dd/mm/yyyy): ").strip()
+    if not user_value:
+        raise ValueError("Anchor date is required.")
+    return datetime.strptime(user_value, "%d/%m/%Y").date()
+
 if __name__ == "__main__":
-    # You can change this to any historical date for backtesting/verifying past setups
-    target_date = date.today()
-    run_screener(target_date)
+    try:
+        target_date = resolve_anchor_date()
+        run_screener(target_date)
+    except ValueError as e:
+        print(f"Error: {e}")

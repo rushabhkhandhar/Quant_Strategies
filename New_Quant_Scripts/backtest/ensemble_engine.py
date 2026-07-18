@@ -31,16 +31,28 @@ class EnsembleBacktestEngine:
         }
         
     def pre_fetch_data(self):
-        print(f"Pre-fetching historical data for {len(self.symbols)} symbols...")
+        # Ensure NIFTYBEES is fetched for the macro regime filter
+        symbols_to_fetch = list(set(self.symbols + ["NIFTYBEES"]))
+        print(f"Pre-fetching historical data for {len(symbols_to_fetch)} symbols...")
         lookback = (self.end_date - self.start_date).days + 300
         
-        raw_history = fetch_bulk_history(self.symbols, self.end_date, lookback)
+        raw_history = fetch_bulk_history(symbols_to_fetch, self.end_date, lookback)
         
         print("Vectorizing indicators across all strategies...")
         for symbol, df in raw_history.items():
             for strategy in self.strategies:
                 df = strategy.prepare_data(df)
             self.history[symbol] = df
+            
+        print("Loading NIFTYBEES Macro Regime Data...")
+        if "NIFTYBEES" in self.history:
+            nifty = self.history["NIFTYBEES"].copy()
+            nifty["EMA_50"] = nifty["Close"].ewm(span=50, adjust=False).mean()
+            self.nifty_history = nifty
+            print("Macro Regime Data loaded successfully!")
+        else:
+            print("Warning: NIFTYBEES not found in Bhavcopy data. Regime filter will be disabled.")
+            self.nifty_history = pd.DataFrame()
             
         print("Data loaded and fully vectorized successfully!")
 
@@ -105,35 +117,46 @@ class EnsembleBacktestEngine:
                 if low <= pos['stop_loss']:
                     exit_price = pos['stop_loss'] if pos['stop_loss'] <= high else open_price
                     revenue = pos['qty'] * pos['stop_loss']
-                    current_cash += revenue
+                    exit_fee = revenue * 0.0015
+                    current_cash += (revenue - exit_fee)
                     self.trades.append({
                         "Strategy": pos['strategy_name'],
                         "Symbol": symbol,
                         "Entry_Date": pos['entry_date'],
                         "Exit_Date": dt_str,
                         "Type": "Stop Loss" if pos['stop_loss'] < pos['entry_price'] else "Trailing SL",
-                        "Profit": revenue - (pos['qty'] * pos['entry_price'])
+                        "Profit": (revenue - exit_fee) - (pos['qty'] * (pos['entry_price'] + pos.get('entry_fee_per_share', 0)))
                     })
                     exit_triggered = True
                     
                 elif not pos['t1_hit'] and high >= pos['target_1']:
                     sell_qty = pos['qty'] // 2
                     revenue = sell_qty * pos['target_1']
-                    current_cash += revenue
+                    exit_fee = revenue * 0.0015
+                    current_cash += (revenue - exit_fee)
                     pos['qty'] -= sell_qty
                     pos['t1_hit'] = True
                     pos['stop_loss'] = pos['entry_price']
+                    self.trades.append({
+                        "Strategy": pos['strategy_name'],
+                        "Symbol": symbol,
+                        "Entry_Date": pos['entry_date'],
+                        "Exit_Date": dt_str,
+                        "Type": "Target 1 (50%)",
+                        "Profit": (revenue - exit_fee) - (sell_qty * (pos['entry_price'] + pos.get('entry_fee_per_share', 0)))
+                    })
                     
                 if not exit_triggered and high >= pos['target_2']:
                     revenue = pos['qty'] * pos['target_2']
-                    current_cash += revenue
+                    exit_fee = revenue * 0.0015
+                    current_cash += (revenue - exit_fee)
                     self.trades.append({
                         "Strategy": pos['strategy_name'],
                         "Symbol": symbol,
                         "Entry_Date": pos['entry_date'],
                         "Exit_Date": dt_str,
                         "Type": "Target 2",
-                        "Profit": revenue - (pos['qty'] * pos['entry_price'])
+                        "Profit": (revenue - exit_fee) - (pos['qty'] * (pos['entry_price'] + pos.get('entry_fee_per_share', 0)))
                     })
                     exit_triggered = True
                     
@@ -161,9 +184,27 @@ class EnsembleBacktestEngine:
                 
                 executed_symbols = set([p['symbol'] for p in open_positions])
                 
+                # Determine Market Regime
+                is_bull_market = True
+                if hasattr(self, 'nifty_history') and not self.nifty_history.empty:
+                    # Find closest previous Nifty date
+                    available_dates = self.nifty_history.index[self.nifty_history.index <= pd.Timestamp(t_date)]
+                    if len(available_dates) > 0:
+                        closest_date = available_dates[-1]
+                        nifty_row = self.nifty_history.loc[closest_date]
+                        if isinstance(nifty_row, pd.DataFrame): nifty_row = nifty_row.iloc[0]
+                        nifty_close = float(nifty_row["Close"])
+                        nifty_ema_50 = float(nifty_row["EMA_50"])
+                        if nifty_close < nifty_ema_50:
+                            is_bull_market = False
+                
                 for sig in todays_signals:
                     if len(open_positions) >= self.max_open_positions or current_cash <= 0:
                         break
+                        
+                    # Market Regime Filter: Block Trend/Breakout trades if market is bearish
+                    if not is_bull_market and sig.metadata.get("strategy_name") in ["VCP_Breakout", "Inside_Day_Squeeze", "Holy_Grail_Pullback"]:
+                        continue
                         
                     symbol = sig.symbol
                     if symbol in executed_symbols:
@@ -185,16 +226,18 @@ class EnsembleBacktestEngine:
                         
                         if qty > 0:
                             cost = qty * exec_price
-                            current_cash -= cost
+                            entry_fee = cost * 0.0015
+                            current_cash -= (cost + entry_fee)
                             
-                            t1_val = sig.targets.get('T1 (2R)', sig.targets.get('T1 (Mean Rev)', exec_price * 1.05))
-                            t2_val = sig.targets.get('T2 (3R)', exec_price * 1.10)
+                            t1_val = sig.targets.get('Target_1', exec_price * 1.03)
+                            t2_val = sig.targets.get('Target_2', exec_price * 1.10)
                             
                             open_positions.append({
                                 "strategy_name": sig.metadata["strategy_name"],
                                 "symbol": symbol,
                                 "entry_date": dt_str,
                                 "entry_price": exec_price,
+                                "entry_fee_per_share": entry_fee / qty,
                                 "qty": qty,
                                 "stop_loss": sig.stop_loss,
                                 "target_1": t1_val,

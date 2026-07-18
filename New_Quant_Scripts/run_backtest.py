@@ -7,16 +7,10 @@ from backtest.engine import BacktestEngine
 from backtest.ensemble_engine import EnsembleBacktestEngine
 from data.nse_fetcher import load_nifty500_symbols
 from strategies.base import BaseStrategy
-from strategies.vcp_breakout import VCPBreakoutStrategy
-from strategies.holy_grail import HolyGrailStrategy
 from strategies.rubber_band import RubberBandStrategy
-from strategies.inside_day_squeeze import InsideDaySqueezeStrategy
 
 STRATEGY_MAP = {
-    "VCP_Breakout": VCPBreakoutStrategy,
-    "Holy_Grail_Pullback": HolyGrailStrategy,
-    "Rubber_Band_Mean_Reversion": RubberBandStrategy,
-    "Inside_Day_Squeeze": InsideDaySqueezeStrategy
+    "Rubber_Band_Mean_Reversion": RubberBandStrategy
 }
 
 def main():
@@ -25,11 +19,11 @@ def main():
     strategies = list(STRATEGY_MAP.keys())
     for idx, s_name in enumerate(strategies, 1):
         print(f"{idx}. {s_name}")
-    print("5. All Strategies (Ensemble Portfolio)")
+    print("2. All Strategies (Ensemble Portfolio)")
         
     strat_idx = input("\nSelect strategy number: ").strip()
     
-    if strat_idx != "5":
+    if strat_idx != "2":
         try:
             selected_strategy = strategies[int(strat_idx) - 1]
         except (ValueError, IndexError):

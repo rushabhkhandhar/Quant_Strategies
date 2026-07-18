@@ -100,14 +100,30 @@ class BacktestEngine:
                     # Exit all remaining quantity at Stop Loss
                     exit_price = pos['stop_loss'] if pos['stop_loss'] <= high else open_price # Approximation
                     revenue = pos['qty'] * pos['stop_loss']
-                    current_cash += revenue
+                    exit_fee = revenue * 0.0015
+                    current_cash += (revenue - exit_fee)
                     
                     self.trades.append({
                         "Symbol": symbol,
                         "Entry_Date": pos['entry_date'],
                         "Exit_Date": dt_str,
                         "Type": "Stop Loss" if pos['stop_loss'] < pos['entry_price'] else "Trailing SL",
-                        "Profit": revenue - (pos['qty'] * pos['entry_price'])
+                        "Profit": (revenue - exit_fee) - (pos['qty'] * (pos['entry_price'] + pos['entry_fee_per_share']))
+                    })
+                    exit_triggered = True
+                    
+                # Check Trailing MA Exit
+                elif pos.get('trailing_ma') and pos['trailing_ma'] in day_data and close < float(day_data[pos['trailing_ma']]):
+                    revenue = pos['qty'] * close
+                    exit_fee = revenue * 0.0015
+                    current_cash += (revenue - exit_fee)
+                    
+                    self.trades.append({
+                        "Symbol": symbol,
+                        "Entry_Date": pos['entry_date'],
+                        "Exit_Date": dt_str,
+                        "Type": f"Trailing {pos['trailing_ma']}",
+                        "Profit": (revenue - exit_fee) - (pos['qty'] * (pos['entry_price'] + pos['entry_fee_per_share']))
                     })
                     exit_triggered = True
                     
@@ -115,7 +131,8 @@ class BacktestEngine:
                 elif not pos['t1_hit'] and high >= pos['target_1']:
                     sell_qty = pos['qty'] // 2
                     revenue = sell_qty * pos['target_1']
-                    current_cash += revenue
+                    exit_fee = revenue * 0.0015
+                    current_cash += (revenue - exit_fee)
                     pos['qty'] -= sell_qty
                     pos['t1_hit'] = True
                     pos['stop_loss'] = pos['entry_price'] # Trail SL to Breakeven
@@ -125,19 +142,20 @@ class BacktestEngine:
                         "Entry_Date": pos['entry_date'],
                         "Exit_Date": dt_str,
                         "Type": "Target 1 (50%)",
-                        "Profit": revenue - (sell_qty * pos['entry_price'])
+                        "Profit": (revenue - exit_fee) - (sell_qty * (pos['entry_price'] + pos['entry_fee_per_share']))
                     })
                     
                     # If Target 2 is also hit on the same day
                     if high >= pos['target_2']:
                         revenue_2 = pos['qty'] * pos['target_2']
-                        current_cash += revenue_2
+                        exit_fee_2 = revenue_2 * 0.0015
+                        current_cash += (revenue_2 - exit_fee_2)
                         self.trades.append({
                             "Symbol": symbol,
                             "Entry_Date": pos['entry_date'],
                             "Exit_Date": dt_str,
                             "Type": "Target 2 (Final)",
-                            "Profit": revenue_2 - (pos['qty'] * pos['entry_price'])
+                            "Profit": (revenue_2 - exit_fee_2) - (pos['qty'] * (pos['entry_price'] + pos['entry_fee_per_share']))
                         })
                         exit_triggered = True
                         
@@ -202,19 +220,22 @@ class BacktestEngine:
                     
                     if qty > 0:
                         cost = qty * exec_price
-                        current_cash -= cost
+                        entry_fee = cost * 0.0015
+                        current_cash -= (cost + entry_fee)
                         
-                        t1_val = sig.targets.get('T1 (2R)', sig.targets.get('T1 (Mean Rev)', exec_price * 1.05))
-                        t2_val = sig.targets.get('T2 (3R)', exec_price * 1.10)
+                        t1_val = sig.targets.get('Target_1', exec_price * 1.03)
+                        t2_val = sig.targets.get('Target_2', exec_price * 1.10)
                         
                         open_positions.append({
                             "symbol": symbol,
                             "entry_date": dt_str,
                             "entry_price": exec_price,
+                            "entry_fee_per_share": entry_fee / qty,
                             "qty": qty,
                             "stop_loss": sig.stop_loss,
                             "target_1": t1_val,
                             "target_2": t2_val,
+                            "trailing_ma": sig.metadata.get("trailing_ma", None),
                             "t1_hit": False,
                             "current_value": qty * float(day_data['Close'])
                         })

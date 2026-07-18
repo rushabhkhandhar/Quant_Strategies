@@ -34,10 +34,20 @@ class RubberBandStrategy(BaseStrategy):
     def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
         if "EMA_20" not in df.columns:
             df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
+        if "EMA_50" not in df.columns:
+            df["EMA_50"] = df["Close"].ewm(span=50, adjust=False).mean()
         if "EMA_200" not in df.columns:
             df["EMA_200"] = df["Close"].ewm(span=200, adjust=False).mean()
         if "RSI_14" not in df.columns:
             df["RSI_14"] = calc_rsi(df, period=14)
+        if "ATR_14" not in df.columns:
+            high_low = df["High"] - df["Low"]
+            high_close = (df["High"] - df["Close"].shift()).abs()
+            low_close = (df["Low"] - df["Close"].shift()).abs()
+            tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+            df["ATR_14"] = tr.rolling(window=14).mean()
+        if "VOL_20" not in df.columns:
+            df["VOL_20"] = df["Volume"].rolling(window=20).mean()
         return df
 
     def analyze(self, candles: CandleSet) -> Optional[Signal]:
@@ -52,8 +62,15 @@ class RubberBandStrategy(BaseStrategy):
         
         curr_close = float(curr_row["Close"])
         curr_ema_20 = float(df['EMA_20'].iloc[-1])
+        curr_ema_50 = float(df['EMA_50'].iloc[-1])
         curr_ema_200 = float(df['EMA_200'].iloc[-1])
         curr_rsi = float(df['RSI_14'].iloc[-1])
+        curr_atr = float(df['ATR_14'].iloc[-1])
+        curr_vol_20 = float(df['VOL_20'].iloc[-1])
+        
+        # 0. Institutional Liquidity Filter
+        if curr_close < 50 or (curr_vol_20 * curr_close) < 100_000_000:
+            return None
         
         # 1. Macro Trend Filter (No catching falling knives in bear markets)
         if curr_close < curr_ema_200:
@@ -80,25 +97,24 @@ class RubberBandStrategy(BaseStrategy):
         if close_pct_of_range < 0.50:
             return None # Still closing near the lows, too dangerous
 
-        # Entry and Stop Loss
-        entry_price = float(curr_row["High"]) * 1.002 # Buy slightly above today's high (confirmation)
-        stop_loss = float(curr_row["Low"]) * 0.99     # Stop below the panic low
+        # Entry and Dynamic Stop Loss (1.5 * ATR)
+        entry_price = float(curr_row["High"]) * 1.002 # Trigger slightly above today's high
+        stop_loss = entry_price - (1.5 * curr_atr)
         
         risk = entry_price - stop_loss
         if risk <= 0:
             return None
             
-        # Mean reversion targets are usually the mean itself!
-        target_1 = curr_ema_20  # Reversion back to the 20 EMA
-        target_2 = entry_price + (risk * 3.0) # Or 3R if it turns into a new leg up
-
+        target_1 = entry_price + (3.0 * curr_atr)
+        target_2 = entry_price + (3.0 * curr_atr)
+        
         return Signal(
             symbol=candles.symbol,
             date=candles.latest_date.strftime("%d/%m/%Y"),
             direction="LONG",
             entry_price=entry_price,
             stop_loss=stop_loss,
-            targets={"T1 (Mean Rev)": target_1, "T2 (3R)": target_2},
+            targets={"Target_1": target_1, "Target_2": target_2},
             metadata={
                 "Close": round(curr_close, 2),
                 "Deviation_%": round(deviation_pct, 2),

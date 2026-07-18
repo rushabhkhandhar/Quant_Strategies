@@ -10,6 +10,7 @@ from core.models import CandleSet, Signal
 from strategies.base import BaseStrategy
 from strategies.vcp_breakout import VCPBreakoutStrategy
 from strategies.holy_grail import HolyGrailStrategy
+from strategies.rubber_band import RubberBandStrategy
 
 # Liquidity threshold: 20-Day Average (Volume * Close) >= 70 Crore
 LIQUIDITY_THRESHOLD = 70 * 1_00_00_000
@@ -27,6 +28,8 @@ def setup_output_dirs(strategies: List[BaseStrategy]) -> str:
     """Create output directories for each strategy."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
     outputs_dir = os.path.join(base_dir, "outputs")
+    os.makedirs(outputs_dir, exist_ok=True)
+    os.makedirs(os.path.join(outputs_dir, "Combined"), exist_ok=True)
     
     for strategy in strategies:
         strategy_dir = os.path.join(outputs_dir, strategy.name)
@@ -41,6 +44,7 @@ def run_screener(as_of_date: date):
     strategies: List[BaseStrategy] = [
         VCPBreakoutStrategy(),
         HolyGrailStrategy(),
+        RubberBandStrategy(),
     ]
     
     outputs_dir = setup_output_dirs(strategies)
@@ -81,6 +85,8 @@ def run_screener(as_of_date: date):
                 
     # 5. Export results
     date_str = as_of_date.strftime("%d_%m_%Y")
+    all_combined_rows = []
+    
     for strategy in strategies:
         signals = all_signals[strategy.name]
         
@@ -92,6 +98,7 @@ def run_screener(as_of_date: date):
         rows = []
         for s in signals:
             row = {
+                "Strategy": strategy.name,
                 "Symbol": s.symbol,
                 "Date": s.date,
                 "Direction": s.direction,
@@ -107,11 +114,21 @@ def run_screener(as_of_date: date):
                 
             row["TradingView_Link"] = f"https://www.tradingview.com/chart/?symbol=NSE%3A{quote(str(s.symbol).upper())}"
             rows.append(row)
+            all_combined_rows.append(row)
             
         df_out = pd.DataFrame(rows)
         out_file = os.path.join(outputs_dir, strategy.name, f"{strategy.name}_Watchlist_{date_str}.csv")
         df_out.to_csv(out_file, index=False)
         print(f"\n[{strategy.name}] Found {len(signals)} setups! Saved to: {out_file}")
+
+    # 6. Export Master Combined List
+    if all_combined_rows:
+        df_combined = pd.DataFrame(all_combined_rows)
+        combined_file = os.path.join(outputs_dir, "Combined", f"Master_Watchlist_{date_str}.csv")
+        df_combined.to_csv(combined_file, index=False)
+        print(f"\n[Combined] Master Watchlist generated with {len(all_combined_rows)} total setups! Saved to: {combined_file}")
+    else:
+        print("\n[Combined] No setups found across any strategy today.")
 
 def resolve_anchor_date() -> date:
     if len(sys.argv) > 1:

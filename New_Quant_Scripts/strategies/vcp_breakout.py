@@ -30,7 +30,8 @@ class VCPBreakoutStrategy(BaseStrategy):
         curr_ema_50 = float(ema_50.iloc[-1])
         curr_ema_200 = float(ema_200.iloc[-1])
 
-        if not (curr_close > curr_ema_50 and curr_ema_50 > curr_ema_200):
+        # Ensure it's a true market leader: Close is at least 20% above the 200 EMA
+        if not (curr_close > curr_ema_50 and curr_ema_50 > curr_ema_200 and curr_close >= (curr_ema_200 * 1.20)):
             return None
 
         # 2. Contraction (Tight Base) Check
@@ -44,8 +45,12 @@ class VCPBreakoutStrategy(BaseStrategy):
             
         base_depth_pct = ((max_high - min_low) / max_high) * 100
         
-        # A tight base is usually < 10% deep in the last 2-3 weeks
-        if base_depth_pct > 10.0:
+        # A tight base is usually < 6% deep in the last 2-3 weeks
+        if base_depth_pct > 6.0:
+            return None
+            
+        # Proximity to Breakout: The current close must be within 1.5% of the resistance high
+        if curr_close < (max_high * 0.985):
             return None
 
         # 3. Volume Contraction Check
@@ -54,7 +59,8 @@ class VCPBreakoutStrategy(BaseStrategy):
         vol_50 = float(df["Volume"].iloc[-50:].mean())
         vol_10 = float(df["Volume"].iloc[-10:].mean())
         
-        if vol_50 <= 0 or vol_10 >= vol_50:
+        # Extreme volume dry-up: 10-day volume is less than 60% of the 50-day average
+        if vol_50 <= 0 or vol_10 >= (vol_50 * 0.60):
             return None
 
         # Calculate practical stops and targets

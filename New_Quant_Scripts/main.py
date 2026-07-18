@@ -1,4 +1,5 @@
 import os
+import sys
 import pandas as pd
 from datetime import date, datetime
 from typing import List
@@ -112,7 +113,11 @@ def run_screener(as_of_date: date):
         print(f"\n[{strategy.name}] Found {len(signals)} setups! Saved to: {out_file}")
 
 def resolve_anchor_date() -> date:
-    user_value = input("Enter anchor date (dd/mm/yyyy): ").strip()
+    if len(sys.argv) > 1:
+        user_value = sys.argv[1].strip()
+    else:
+        user_value = input("Enter anchor date (dd/mm/yyyy): ").strip()
+        
     if not user_value:
         raise ValueError("Anchor date is required.")
     return datetime.strptime(user_value, "%d/%m/%Y").date()

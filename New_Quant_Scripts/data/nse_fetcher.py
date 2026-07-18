@@ -136,6 +136,41 @@ def fetch_daily_candles(symbol: str, as_of_date: date, lookback_days: int = 320)
 
     return CandleSet(symbol=symbol, daily=daily)
 
+def fetch_bulk_history(symbols: List[str], end_date: date, lookback_days: int) -> Dict[str, pd.DataFrame]:
+    """Highly optimized vectorized fetcher that returns history for multiple symbols in one pass."""
+    days_to_fetch = [end_date - timedelta(days=offset) for offset in range(lookback_days + 1)]
+    missing_days = [d for d in days_to_fetch if d.strftime("%Y-%m-%d") not in _BHAVCOPY_CACHE]
+    
+    if missing_days:
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            list(executor.map(_download_bhavcopy_for_date, missing_days))
+            
+    all_dfs = []
+    for day in days_to_fetch:
+        df = _download_bhavcopy_for_date(day)
+        if df is not None and not df.empty:
+            df = df.copy()
+            df['Date'] = pd.to_datetime(day)
+            all_dfs.append(df)
+            
+    if not all_dfs:
+        return {}
+        
+    master_df = pd.concat(all_dfs).reset_index()
+    master_df = master_df[master_df['SYMBOL'].isin(symbols)]
+    master_df = master_df.rename(columns={"OPEN": "Open", "HIGH": "High", "LOW": "Low", "CLOSE": "Close", "VOLUME": "Volume"})
+    master_df = master_df.dropna(subset=["Date", "Open", "High", "Low", "Close"])
+    master_df = master_df.sort_values(by=["SYMBOL", "Date"])
+    master_df = master_df.drop_duplicates(subset=["SYMBOL", "Date"], keep="last")
+    
+    history = {}
+    for symbol, group in master_df.groupby("SYMBOL"):
+        daily = group.set_index("Date")[["Open", "High", "Low", "Close", "Volume"]]
+        if len(daily) >= 10:
+            history[symbol] = daily
+            
+    return history
+
 # --- Symbol Loaders ---
 
 def _load_symbols_from_csv_urls(

@@ -18,27 +18,36 @@ class InsideDaySqueezeStrategy(BaseStrategy):
     def name(self) -> str:
         return "Inside_Day_Squeeze"
 
+    def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        if "EMA_50" not in df.columns:
+            df["EMA_50"] = df["Close"].ewm(span=50, adjust=False).mean()
+        if "BB_Mean" not in df.columns:
+            df["BB_Mean"] = df["Close"].rolling(window=20).mean()
+            df["BB_Std"] = df["Close"].rolling(window=20).std()
+            df["Upper_BB"] = df["BB_Mean"] + (df["BB_Std"] * 2)
+            df["Lower_BB"] = df["BB_Mean"] - (df["BB_Std"] * 2)
+        if "VOL_20" not in df.columns:
+            df["VOL_20"] = df["Volume"].rolling(window=20).mean()
+        return df
+
     def analyze(self, candles: CandleSet) -> Optional[Signal]:
         df = candles.daily
         if len(df) < 50:
             return None
 
-        # Calculate Indicators
-        ema_50 = df["Close"].ewm(span=50, adjust=False).mean()
-        
-        # Bollinger Bands (20-period, 2 std dev)
-        rolling_mean = df["Close"].rolling(window=20).mean()
-        rolling_std = df["Close"].rolling(window=20).std()
-        upper_bb = rolling_mean + (rolling_std * 2)
-        lower_bb = rolling_mean - (rolling_std * 2)
-        
-        vol_20 = df["Volume"].rolling(window=20).mean()
+        # Ensure indicators are calculated
+        df = self.prepare_data(df)
         
         curr_row = df.iloc[-1]
         prev_row = df.iloc[-2]
         
         curr_close = float(curr_row["Close"])
-        curr_ema_50 = float(ema_50.iloc[-1])
+        curr_ema_50 = float(df['EMA_50'].iloc[-1])
+        
+        upper_bb = float(df['Upper_BB'].iloc[-1])
+        lower_bb = float(df['Lower_BB'].iloc[-1])
+        rolling_mean = float(df['BB_Mean'].iloc[-1])
+        vol_20_curr = float(df['VOL_20'].iloc[-1])
         
         # 1. Trend Filter
         if curr_close < curr_ema_50:
@@ -46,7 +55,7 @@ class InsideDaySqueezeStrategy(BaseStrategy):
             
         # 2. Bollinger Band Squeeze Check (Volatility Contraction)
         # The width of the bands must be very tight, e.g., less than 6% of the price.
-        bb_width_pct = ((float(upper_bb.iloc[-1]) - float(lower_bb.iloc[-1])) / float(rolling_mean.iloc[-1])) * 100
+        bb_width_pct = ((upper_bb - lower_bb) / rolling_mean) * 100
         if pd.isna(bb_width_pct) or bb_width_pct > 6.0:
             return None
             
@@ -61,7 +70,7 @@ class InsideDaySqueezeStrategy(BaseStrategy):
         # 4. Volume Check
         # Volume on the inside day should be below average, indicating equilibrium before the storm.
         curr_vol = float(curr_row["Volume"])
-        if curr_vol >= float(vol_20.iloc[-1]):
+        if curr_vol >= vol_20_curr:
             return None
 
         # Entry and Stop Loss

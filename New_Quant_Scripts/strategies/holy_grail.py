@@ -29,13 +29,14 @@ def calc_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     
     # Wilder's Smoothing (alpha = 1/period)
     def wilder_smooth(s: pd.Series, n: int) -> pd.Series:
-        res = np.full_like(s, np.nan)
+        res = np.full_like(s, np.nan, dtype=float)
         if len(s) < n:
             return pd.Series(res, index=s.index)
             
-        res[n] = s[1:n+1].sum()
+        s_vals = s.to_numpy(dtype=float)
+        res[n] = np.nansum(s_vals[1:n+1])
         for i in range(n+1, len(s)):
-            res[i] = res[i-1] - (res[i-1] / n) + s.iloc[i]
+            res[i] = res[i-1] - (res[i-1] / n) + s_vals[i]
         return pd.Series(res, index=s.index)
         
     atr = wilder_smooth(tr, period)
@@ -61,32 +62,44 @@ class HolyGrailStrategy(BaseStrategy):
     def name(self) -> str:
         return "Holy_Grail_Pullback"
 
+    def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        if "EMA_20" not in df.columns:
+            df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
+        if "EMA_50" not in df.columns:
+            df["EMA_50"] = df["Close"].ewm(span=50, adjust=False).mean()
+        if "EMA_200" not in df.columns:
+            df["EMA_200"] = df["Close"].ewm(span=200, adjust=False).mean()
+        if "VOL_20" not in df.columns:
+            df["VOL_20"] = df["Volume"].rolling(window=20).mean()
+        if "ADX" not in df.columns:
+            adx_data = calc_adx(df, period=14)
+            df["ADX"] = adx_data["ADX"]
+            df["+DI"] = adx_data["+DI"]
+            df["-DI"] = adx_data["-DI"]
+        return df
+
     def analyze(self, candles: CandleSet) -> Optional[Signal]:
         df = candles.daily
         if len(df) < 50:
             return None
 
-        # Calculate Indicators
-        ema_20 = df["Close"].ewm(span=20, adjust=False).mean()
-        ema_50 = df["Close"].ewm(span=50, adjust=False).mean()
-        ema_200 = df["Close"].ewm(span=200, adjust=False).mean()
-        vol_20 = df["Volume"].rolling(window=20).mean()
-        adx_data = calc_adx(df, period=14)
+        # Ensure indicators are calculated
+        df = self.prepare_data(df)
         
         curr_row = df.iloc[-1]
         prev_row = df.iloc[-2]
         
-        curr_adx = float(adx_data['ADX'].iloc[-1])
-        prev3_adx = float(adx_data['ADX'].iloc[-4])  # ADX 3 days ago
-        curr_plus_di = float(adx_data['+DI'].iloc[-1])
-        curr_minus_di = float(adx_data['-DI'].iloc[-1])
+        curr_adx = float(df['ADX'].iloc[-1])
+        prev3_adx = float(df['ADX'].iloc[-4])  # ADX 3 days ago
+        curr_plus_di = float(df['+DI'].iloc[-1])
+        curr_minus_di = float(df['-DI'].iloc[-1])
         
-        curr_ema_20 = float(ema_20.iloc[-1])
-        curr_ema_50 = float(ema_50.iloc[-1])
-        curr_ema_200 = float(ema_200.iloc[-1])
+        curr_ema_20 = float(df['EMA_20'].iloc[-1])
+        curr_ema_50 = float(df['EMA_50'].iloc[-1])
+        curr_ema_200 = float(df['EMA_200'].iloc[-1])
         
         curr_vol = float(curr_row["Volume"])
-        curr_vol_20 = float(vol_20.iloc[-1])
+        curr_vol_20 = float(df['VOL_20'].iloc[-1])
         
         # 1. Extreme Trend Filter (ADX > 35 and Rising)
         if pd.isna(curr_adx) or curr_adx < 35:

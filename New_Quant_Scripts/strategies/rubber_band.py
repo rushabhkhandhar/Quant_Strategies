@@ -31,22 +31,29 @@ class RubberBandStrategy(BaseStrategy):
     def name(self) -> str:
         return "Rubber_Band_Mean_Reversion"
 
+    def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        if "EMA_20" not in df.columns:
+            df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
+        if "EMA_200" not in df.columns:
+            df["EMA_200"] = df["Close"].ewm(span=200, adjust=False).mean()
+        if "RSI_14" not in df.columns:
+            df["RSI_14"] = calc_rsi(df, period=14)
+        return df
+
     def analyze(self, candles: CandleSet) -> Optional[Signal]:
         df = candles.daily
         if len(df) < 200:
             return None
 
-        # Calculate Indicators
-        ema_20 = df["Close"].ewm(span=20, adjust=False).mean()
-        ema_200 = df["Close"].ewm(span=200, adjust=False).mean()
-        rsi_14 = calc_rsi(df, period=14)
+        # Ensure indicators are calculated
+        df = self.prepare_data(df)
         
         curr_row = df.iloc[-1]
         
         curr_close = float(curr_row["Close"])
-        curr_ema_20 = float(ema_20.iloc[-1])
-        curr_ema_200 = float(ema_200.iloc[-1])
-        curr_rsi = float(rsi_14.iloc[-1])
+        curr_ema_20 = float(df['EMA_20'].iloc[-1])
+        curr_ema_200 = float(df['EMA_200'].iloc[-1])
+        curr_rsi = float(df['RSI_14'].iloc[-1])
         
         # 1. Macro Trend Filter (No catching falling knives in bear markets)
         if curr_close < curr_ema_200:

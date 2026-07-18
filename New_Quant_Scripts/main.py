@@ -79,7 +79,10 @@ def run_screener(as_of_date: date):
         # 4. Pass the exact same dataset to EVERY strategy
         for strategy in strategies:
             try:
-                signal = strategy.analyze(candles)
+                # Give each strategy its own copy so indicators don't collide
+                strat_candles = CandleSet(symbol=symbol, daily=candles.daily.copy())
+                strat_candles.daily = strategy.prepare_data(strat_candles.daily)
+                signal = strategy.analyze(strat_candles)
                 if signal:
                     all_signals[strategy.name].append(signal)
             except Exception as e:

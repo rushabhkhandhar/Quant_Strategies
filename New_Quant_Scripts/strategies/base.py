@@ -19,3 +19,10 @@ class BaseStrategy(ABC):
         otherwise return None.
         """
         pass
+        
+    def prepare_data(self, df):
+        """
+        Optional hook to pre-calculate indicators on the entire dataframe 
+        for vectorized backtesting performance. By default, returns df untouched.
+        """
+        return df

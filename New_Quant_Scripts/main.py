@@ -9,6 +9,7 @@ from data.nse_fetcher import load_nifty500_symbols, fetch_daily_candles
 from core.models import CandleSet, Signal
 from strategies.base import BaseStrategy
 from strategies.vcp_breakout import VCPBreakoutStrategy
+from strategies.holy_grail import HolyGrailStrategy
 
 # Liquidity threshold: 20-Day Average (Volume * Close) >= 70 Crore
 LIQUIDITY_THRESHOLD = 70 * 1_00_00_000
@@ -39,7 +40,7 @@ def run_screener(as_of_date: date):
     # 1. Initialize all strategies
     strategies: List[BaseStrategy] = [
         VCPBreakoutStrategy(),
-        # Add more strategies here in the future
+        HolyGrailStrategy(),
     ]
     
     outputs_dir = setup_output_dirs(strategies)

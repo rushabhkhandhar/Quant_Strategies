@@ -5,11 +5,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from io import StringIO
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 import matplotlib.pyplot as plt
-import mplfinance as mpf
+import mplfinance as mpf 
 import pandas as pd
 
 
@@ -21,7 +21,7 @@ class CandleSet:
 _BHAVCOPY_CACHE: Dict[str, Optional[pd.DataFrame]] = {}
 
 # ---------------------------------------------------------------------------
-# Liquidity threshold: Volume × Close Price >= 70 Crore (₹700,000,000)
+# Liquidity threshold: 20-Day Average (Volume × Close Price) >= 70 Crore
 # ---------------------------------------------------------------------------
 LIQUIDITY_THRESHOLD_CRORE = 70
 LIQUIDITY_THRESHOLD = LIQUIDITY_THRESHOLD_CRORE * 1_00_00_000  # 70 Cr in INR
@@ -148,7 +148,7 @@ def _download_bhavcopy_for_date(trade_date: date) -> Optional[pd.DataFrame]:
 		return None
 
 
-def _find_column(columns: Sequence[str], candidates: Sequence[str]) -> Optional[str]:
+def _find_column(columns: Any, candidates: Sequence[str]) -> Optional[str]:
 	lookup = {str(c).strip().upper(): c for c in columns}
 	for candidate in candidates:
 		if candidate in lookup:
@@ -175,7 +175,7 @@ def fetch_daily_candles(symbol: str, as_of_date: date) -> Optional[CandleSet]:
 		volume_col = _find_column(df.columns, ["TOTTRDQTY", "TTL_TRD_QNTY", "VOLUME", "TOTTRD_QTY"])
 		date_col = _find_column(df.columns, ["DATE1", "DATE", "TIMESTAMP"])
 
-		if not all([symbol_col, series_col, open_col, high_col, low_col, close_col, date_col]):
+		if not (symbol_col and series_col and open_col and high_col and low_col and close_col and date_col):
 			continue
 
 		day_df = df.copy()
@@ -232,10 +232,13 @@ def fetch_daily_candles(symbol: str, as_of_date: date) -> Optional[CandleSet]:
 
 
 def is_liquid(daily: pd.DataFrame) -> bool:
-	"""Return True if the most recent candle has Volume × Close >= 100 Crore."""
-	last = daily.iloc[-1]
-	traded_value = float(last["Volume"]) * float(last["Close"])
-	return traded_value >= LIQUIDITY_THRESHOLD
+	"""Return True if the 20-day average Volume × Close >= LIQUIDITY_THRESHOLD."""
+	if len(daily) < 20:
+		return False
+	
+	recent = daily.iloc[-20:]
+	avg_traded_value = (recent["Volume"] * recent["Close"]).mean()
+	return float(avg_traded_value) >= LIQUIDITY_THRESHOLD
 
 
 def build_tradingview_link(symbol: str) -> str:
@@ -325,7 +328,7 @@ def export_annotated_chart(
 		"SL2": 1,
 		"SL3": 1,
 	}
-	merged: Dict[float, Dict[str, object]] = {}
+	merged: Dict[float, Dict[str, Any]] = {}
 	for name, level, color, style in raw_levels:
 		k = round(level, 2)
 		if k not in merged:
@@ -416,7 +419,8 @@ def compute_trade_levels(
 	"""Build practical target and stop-loss tiers for long setups."""
 	range_size = max(swing_high - swing_low, 1e-9)
 
-	stop_loss_1 = min(current_low, fib_618)
+	# Added a 1% buffer below the 61.8% level for SL1 to avoid stop-hunts
+	stop_loss_1 = min(current_low, fib_618 * 0.99)
 	stop_loss_2 = swing_low
 	stop_loss_3 = swing_low - 0.25 * range_size
 
@@ -435,7 +439,7 @@ def compute_trade_levels(
 	}
 
 
-def bullish_hammer(candle: pd.Series) -> bool:
+def bullish_hammer(candle: "pd.Series[Any]") -> bool:
 	open_price = float(candle["Open"])
 	close_price = float(candle["Close"])
 	high_price = float(candle["High"])
@@ -446,26 +450,26 @@ def bullish_hammer(candle: pd.Series) -> bool:
 	upper_shadow = high_price - max(open_price, close_price)
 	day_range = max(high_price - low_price, 1e-9)
 
+	# Relaxed: Can be red or green. Lower shadow must be at least 2x the body.
+	# Upper shadow must be small.
 	return (
-		close_price >= open_price
-		and lower_shadow >= 2.0 * max(body, 1e-9)
-		and upper_shadow <= (0.10 * day_range)
-		and ((high_price - close_price) / day_range) <= 0.35
+		lower_shadow >= 2.0 * max(body, 1e-9)
+		and upper_shadow <= (0.15 * day_range)
 	)
 
 
-def bullish_engulfing(prev_candle: pd.Series, curr_candle: pd.Series) -> bool:
+def bullish_engulfing(prev_candle: "pd.Series[Any]", curr_candle: "pd.Series[Any]") -> bool:
 	prev_open = float(prev_candle["Open"])
 	prev_close = float(prev_candle["Close"])
 	curr_open = float(curr_candle["Open"])
 	curr_close = float(curr_candle["Close"])
 
+	# Relaxed: Previous is red, Current is green.
+	# Current close strongly engulfs previous open (ignoring exact gap constraints).
 	return (
 		prev_close < prev_open
 		and curr_close > curr_open
-		and curr_open <= prev_close
-		and curr_close >= prev_open
-		and (curr_close - curr_open) > (prev_open - prev_close)
+		and curr_close > prev_open
 	)
 
 
@@ -476,7 +480,7 @@ def fibonacci_bounce_tomorrow_signal(
 	volume_lookback: int,
 	volume_multiplier: float,
 	min_swing_pct: float,
-) -> Optional[Dict[str, float]]:
+) -> Optional[Dict[str, Any]]:
 	"""Fibonacci retracement bounce setup for next day.
 
 	Rules:
@@ -488,15 +492,26 @@ def fibonacci_bounce_tomorrow_signal(
 	if len(daily) < max(swing_lookback + 2, volume_lookback + 2):
 		return None
 
+	# Macro Trend Filter: Ensure stock is in a general uptrend (Close > 200 EMA)
+	ema_200 = daily["Close"].ewm(span=200, adjust=False).mean()
+	if float(daily.iloc[-1]["Close"]) < float(ema_200.iloc[-1]):
+		return None
+
 	window = daily.iloc[-swing_lookback:]
 	high_idx = window["High"].idxmax()
-	prefix = window.loc[:high_idx]
+	
+	# Stale Swing Check: Ensure the swing high occurred within the last 20 trading days
+	days_since_high = len(window.loc[high_idx:]) - 1  # type: ignore
+	if days_since_high > 20:
+		return None
+
+	prefix = window.loc[:high_idx]  # type: ignore
 	if len(prefix) < 2:
 		return None
 
 	low_idx = prefix["Low"].idxmin()
-	swing_high = float(window.loc[high_idx, "High"])
-	swing_low = float(prefix.loc[low_idx, "Low"])
+	swing_high = float(window.loc[high_idx, "High"])  # type: ignore
+	swing_low = float(prefix.loc[low_idx, "Low"])  # type: ignore
 
 	if swing_high <= swing_low:
 		return None
@@ -521,8 +536,13 @@ def fibonacci_bounce_tomorrow_signal(
 	touched_50 = low_price <= fib_50 <= high_price
 	touched_618 = low_price <= fib_618 <= high_price
 
-	near_50 = touched_50 or dist_50 <= near_level_pct
-	near_618 = touched_618 or dist_618 <= near_level_pct
+	# Ensure price didn't just crash through and close significantly below support.
+	# The close should be above, or extremely close to the fib level (within 0.5% below).
+	defends_50 = touched_50 and close_price >= (fib_50 * 0.995)
+	defends_618 = touched_618 and close_price >= (fib_618 * 0.995)
+
+	near_50 = defends_50 or dist_50 <= near_level_pct
+	near_618 = defends_618 or dist_618 <= near_level_pct
 	if not (near_50 or near_618):
 		return None
 
@@ -602,13 +622,13 @@ def _process_symbol(
 		return None, f"{symbol}: SKIPPED (no_data)" if verbose else None
 
 	# ------------------------------------------------------------------
-	# Liquidity filter: Volume × Close must be >= 100 Crore on last day
+	# Liquidity filter: 20-Day Average Volume × Close must be >= 70 Crore
 	# ------------------------------------------------------------------
 	if not is_liquid(candles.daily):
-		last = candles.daily.iloc[-1]
-		traded_value_cr = (float(last["Volume"]) * float(last["Close"])) / 1_00_00_000
+		recent = candles.daily.iloc[-20:]
+		avg_traded_cr = (recent["Volume"] * recent["Close"]).mean() / 1_00_00_000 if len(recent) > 0 else 0
 		return None, (
-			f"{symbol}: SKIPPED (low_liquidity {traded_value_cr:.1f} Cr < {LIQUIDITY_THRESHOLD_CRORE} Cr)"
+			f"{symbol}: SKIPPED (low_liquidity {avg_traded_cr:.1f} Cr < {LIQUIDITY_THRESHOLD_CRORE} Cr avg)"
 			if verbose else None
 		)
 

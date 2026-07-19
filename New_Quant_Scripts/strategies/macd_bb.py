@@ -11,22 +11,26 @@ class MacdBbStrategy(BaseStrategy):
     Rules:
     1) Bollinger Bands (20,2) width has been narrow (<8%) over last 15 days.
     2) MACD (12, 26, 9) crosses over today.
-    3) Price is near the outer band (<2% distance).
-    4) Volume is above the 15-day average.
+    3) Price is near the outer band (<1.0% distance).
+    4) Volume is at least 2.0x the 20-day average.
     """
     
     def __init__(self):
         super().__init__()
         self.bb_narrow_lookback = 15
         self.bb_width_max_pct = 8.0
-        self.volume_multiplier = 1.0
-        self.near_breakout_pct = 2.0
+        self.volume_multiplier = 2.0  # volume expansion multiplier (e.g., 2× avg volume)
+        self.near_breakout_pct = 1.0  # % distance from band
+        # Removed unused ATR parameters (min_atr, max_atr_lookback)
+        self.min_vol_value = 70_000_000  # legacy liquidity filter (kept for backward compatibility)
+        self.trend_sma_window = 200  # market regime filter (SMA)
 
     @property
     def name(self) -> str:
         return "MACD_BB_Expansion"
 
     def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
         # MACD (12, 26, 9)
         if "macd" not in df.columns:
             ema12 = df["Close"].ewm(span=12, adjust=False).mean()
@@ -43,6 +47,7 @@ class MacdBbStrategy(BaseStrategy):
             df["bb_upper"] = middle + (2.0 * std)
             df["bb_lower"] = middle - (2.0 * std)
             df["bb_width_pct"] = ((df["bb_upper"] - df["bb_lower"]) / middle.replace(0, pd.NA)) * 100.0
+        df.loc[:, "sma_200"] = df["Close"].rolling(self.trend_sma_window).mean()
 
         # ATR (14) for Targets
         if "ATR" not in df.columns:
@@ -56,7 +61,7 @@ class MacdBbStrategy(BaseStrategy):
 
     def analyze(self, candles: CandleSet) -> Optional[Signal]:
         df = candles.daily
-        if len(df) < max(60, self.bb_narrow_lookback + 25):
+        if len(df) < max(200, self.bb_narrow_lookback + 25):
             return None
 
         # Ensure indicators are calculated
@@ -65,67 +70,80 @@ class MacdBbStrategy(BaseStrategy):
         curr = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # bb_prev represents the last 15 days, EXCLUDING today
-        bb_prev = df.iloc[-(self.bb_narrow_lookback + 1):-1]
+        # Volatility Contraction: ensure *all* recent widths are below the threshold for sustained narrowness
+        recent_widths = df["bb_width_pct"].iloc[-(self.bb_narrow_lookback + 1):-1]
+        if recent_widths.isna().any() or (recent_widths > self.bb_width_max_pct).any():
+            return None
         
-        # Volatility Contraction Check
-        avg_width = float(bb_prev["bb_width_pct"].mean())
-        if avg_width > self.bb_width_max_pct:
+        # Volume Filter: compute 20‑day rolling average volume excluding the current candle
+        avg_vol_20 = df["Volume"].shift(1).rolling(window=20).mean()
+        if pd.isna(avg_vol_20.iloc[-1]):
+            return None
+        # Liquidity filter: ensure the average traded value over the past 20 days meets a minimum threshold
+        avg_traded_value_20 = (df["Volume"] * df["Close"]).shift(1).rolling(window=20).mean()
+        if avg_traded_value_20.iloc[-1] < self.min_vol_value:
+            return None
+        # Volume expansion filter: ensure today's volume is at least volume_multiplier × avg volume
+        if float(curr["Volume"]) < (self.volume_multiplier * avg_vol_20.iloc[-1]):
+            return None
+        
+        # Trend filter (only trade in direction of 200 SMA)
+        if not pd.isna(curr["sma_200"]):
+            is_uptrend = curr["Close"] >= curr["sma_200"]
+            is_downtrend = curr["Close"] <= curr["sma_200"]
+        else:
+            is_uptrend = is_downtrend = False
+
+        # ATR must be a valid number
+        if pd.isna(curr["ATR"]):
             return None
 
-        # Volume Expansion Check
-        avg_vol = float(bb_prev["Volume"].mean())
-        curr_vol = float(curr["Volume"])
-        if avg_vol > 0 and curr_vol < (self.volume_multiplier * avg_vol):
-            return None
-
-        # Liquidity Filter (Approx 70 Cr based on recent volume)
-        if (avg_vol * float(curr["Close"])) < 70_000_000:
-            return None
-
-        # MACD Crossover
+        # MACD Crossover detection
         bull_cross = float(curr["macd"]) > float(curr["signal"]) and float(prev["macd"]) <= float(prev["signal"])
         bear_cross = float(curr["macd"]) < float(curr["signal"]) and float(prev["macd"]) >= float(prev["signal"])
-
+        
         close_price = float(curr["Close"])
         upper = float(curr["bb_upper"])
         lower = float(curr["bb_lower"])
-
-        up_dist = ((upper - close_price) / upper) * 100.0 if upper > 0 else 999.0
-        down_dist = ((close_price - lower) / max(lower, 1e-9)) * 100.0 if lower > 0 else 999.0
-
-        near_upper = close_price <= upper and up_dist <= self.near_breakout_pct
-        near_lower = close_price >= lower and down_dist <= self.near_breakout_pct
-
+        
+        up_dist = abs(upper - close_price) / upper * 100.0 if upper > 0 else 999.0
+        down_dist = abs(close_price - lower) / max(lower, 1e-9) * 100.0 if lower > 0 else 999.0
+        
         direction = ""
         distance = 0.0
-        if bull_cross and near_upper:
+        if bull_cross and is_uptrend and up_dist < self.near_breakout_pct:
             direction = "LONG"
-            distance = max(up_dist, 0.0)
-        elif bear_cross and near_lower:
+            distance = up_dist
+        elif bear_cross and is_downtrend and down_dist < self.near_breakout_pct:
             direction = "SHORT"
-            distance = max(down_dist, 0.0)
+            distance = down_dist
         else:
             return None
-            
+        
+        # Composite ranking score (higher is better)
+        hist_strength = abs(float(curr["hist"]))
+        vol_exp = float(curr["Volume"]) / avg_vol_20.iloc[-1] if avg_vol_20.iloc[-1] != 0 else 0
+        # Robust ATR expansion handling (avoid NaN or zero division)
+        curr_atr_val = float(curr["ATR"]) if not pd.isna(curr["ATR"]) else 0.0
+        prev_atr_val = float(prev["ATR"]) if not pd.isna(prev["ATR"]) else 0.0
+        atr_exp = (curr_atr_val / prev_atr_val) if prev_atr_val > 0 else 1.0
+        # We penalize larger distance from Bollinger band
+        rank_score = (0.4 * hist_strength) + (0.3 * vol_exp) + (0.2 * atr_exp) - (0.1 * distance)
+        
         curr_atr = float(curr["ATR"])
-        bb_mid = float(curr["bb_mid"])
 
+        # Realistic entry: signal generated after today's close; entry is placed slightly above today’s high (LONG) or below today's low (SHORT) to ensure execution on the next trading day when price moves in the breakout direction
         if direction == "LONG":
-            entry_price = float(curr["High"]) * 1.002
-            stop_loss = bb_mid
-            target_1 = entry_price + (3.0 * curr_atr)
-            target_2 = entry_price + (3.0 * curr_atr)
+            entry_price = float(curr["High"]) * 1.001
+            stop_loss = entry_price - (2.0 * curr_atr)
+            target_1 = entry_price + (2.0 * curr_atr)
+            target_2 = entry_price + (4.0 * curr_atr)
         else:
-            entry_price = float(curr["Low"]) * 0.998
-            stop_loss = bb_mid
-            target_1 = entry_price - (3.0 * curr_atr)
-            target_2 = entry_price - (3.0 * curr_atr)
+            entry_price = float(curr["Low"]) * 0.999
+            stop_loss = entry_price + (2.0 * curr_atr)
+            target_1 = entry_price - (2.0 * curr_atr)
+            target_2 = entry_price - (4.0 * curr_atr)
             
-        risk = abs(entry_price - stop_loss)
-        if risk <= 0:
-            return None
-
         return Signal(
             symbol=candles.symbol,
             date=candles.latest_date.strftime("%d/%m/%Y"),
@@ -134,17 +152,10 @@ class MacdBbStrategy(BaseStrategy):
             stop_loss=stop_loss,
             targets={"Target_1": target_1, "Target_2": target_2},
             metadata={
-                "Close": round(close_price, 2),
-                "macd": round(float(curr["macd"]), 4),
-                "signal_line": round(float(curr["signal"]), 4),
-                "histogram": round(float(curr["hist"]), 4),
-                "bb_upper": round(upper, 2),
-                "bb_lower": round(lower, 2),
-                "bb_width_avg_pct": round(avg_width, 2),
-                "distance_to_band_pct": round(distance, 2),
-                "ATR": round(curr_atr, 2),
-                "Avg_Volume": int(avg_vol),
-                "Curr_Volume": int(curr_vol),
-                "rank_score": -distance # Prioritize closest to the band
+                "macd_cross": True,
+                "bb_width_pct": round(float(curr["bb_width_pct"]), 2),
+                "vol_vs_avg": round(float(curr["Volume"]) / avg_vol_20.iloc[-1], 2),
+                "rank_score": round(rank_score, 4),
+                "ATR": float(curr["ATR"]) if not pd.isna(curr["ATR"]) else 0.0
             }
         )

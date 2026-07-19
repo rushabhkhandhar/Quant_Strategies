@@ -2,6 +2,6 @@ Output/
 Siddharth_scripts/
 .venv/
 Sattva/
-Quant_script/__pycache__/
 New_Quant_Scripts/outputs/
 New_Quant_Scripts/data/bhavcopy_cache/
+Quant_script/

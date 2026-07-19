@@ -89,6 +89,7 @@ class BacktestEngine:
                 if isinstance(day_data, pd.DataFrame):
                     day_data = day_data.iloc[0]
                     
+                open_price = float(day_data['Open'])
                 high = float(day_data['High'])
                 low = float(day_data['Low'])
                 close = float(day_data['Close'])
@@ -98,7 +99,7 @@ class BacktestEngine:
                 # Check Stop Loss First (Pessimistic execution)
                 if low <= pos['stop_loss']:
                     # Exit all remaining quantity at Stop Loss
-                    exit_price = pos['stop_loss'] if pos['stop_loss'] <= high else open_price # Approximation
+                    exit_price = pos['stop_loss'] if pos['stop_loss'] <= high else open_price
                     revenue = pos['qty'] * pos['stop_loss']
                     exit_fee = revenue * 0.0015
                     current_cash += (revenue - exit_fee)
@@ -162,13 +163,14 @@ class BacktestEngine:
                 # Check Target 2
                 elif pos['t1_hit'] and high >= pos['target_2']:
                     revenue = pos['qty'] * pos['target_2']
-                    current_cash += revenue
+                    exit_fee = revenue * 0.0015
+                    current_cash += (revenue - exit_fee)
                     self.trades.append({
                         "Symbol": symbol,
                         "Entry_Date": pos['entry_date'],
                         "Exit_Date": dt_str,
                         "Type": "Target 2 (Final)",
-                        "Profit": revenue - (pos['qty'] * pos['entry_price'])
+                        "Profit": (revenue - exit_fee) - (pos['qty'] * (pos['entry_price'] + pos['entry_fee_per_share']))
                     })
                     exit_triggered = True
                     

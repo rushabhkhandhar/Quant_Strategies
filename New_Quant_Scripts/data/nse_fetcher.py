@@ -3,6 +3,7 @@ import time
 from datetime import date, datetime, timedelta
 from io import StringIO
 from typing import Any, Dict, List, Optional, Sequence
+import urllib.error
 from urllib.request import Request, urlopen
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
@@ -12,27 +13,64 @@ from core.models import CandleSet
 # Global in-memory cache to avoid repeated network requests in the same run
 _BHAVCOPY_CACHE: Dict[str, Optional[pd.DataFrame]] = {}
 
+# Persistent on-disk cache to survive script restarts and avoid rate-limiting
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bhavcopy_cache")
+os.makedirs(_CACHE_DIR, exist_ok=True)
+
 def _download_bhavcopy_for_date(trade_date: date) -> Optional[pd.DataFrame]:
-    """Download one NSE full bhavcopy day (or load from in-memory cache)."""
+    """Download one NSE full bhavcopy day (or load from disk/in-memory cache)."""
     key = trade_date.strftime("%Y-%m-%d")
     
+    # 1. Check in-memory
     if key in _BHAVCOPY_CACHE:
         return _BHAVCOPY_CACHE[key]
+
+    disk_path = os.path.join(_CACHE_DIR, f"{key}.parquet")
+    missing_path = os.path.join(_CACHE_DIR, f"{key}.missing")
+
+    # 2. Check disk cache
+    if os.path.exists(missing_path):
+        _BHAVCOPY_CACHE[key] = None
+        return None
+    if os.path.exists(disk_path):
+        try:
+            df = pd.read_parquet(disk_path)
+            _BHAVCOPY_CACHE[key] = df
+            return df
+        except Exception:
+            pass # Fall back to download if corrupted
 
     url = (
         "https://nsearchives.nseindia.com/products/content/"
         f"sec_bhavdata_full_{trade_date.strftime('%d%m%Y')}.csv"
     )
     headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/csv,text/plain,*/*",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive"
     }
     request = Request(url, headers=headers)
 
-    try:
-        with urlopen(request, timeout=10) as response:
-            content = response.read().decode("utf-8", errors="ignore")
+    for attempt in range(3):
+        try:
+            with urlopen(request, timeout=10) as response:
+                content = response.read().decode("utf-8", errors="ignore")
+            break
+        except urllib.error.HTTPError as e:
+            if e.code == 404: # Not found (Holiday/Weekend)
+                _BHAVCOPY_CACHE[key] = None
+                with open(missing_path, 'w') as f: f.write("") # Remember it's missing permanently
+                return None
+            time.sleep(2.0 + attempt)
+        except Exception:
+            time.sleep(2.0 + attempt)
+    else:
+        # Failed after retries
+        print(f"Warning: Failed to fetch {key} due to rate limits.")
+        return None
         
+    try:
         df = pd.read_csv(StringIO(content), engine="python", on_bad_lines="skip")
         df.columns = [str(c).strip().upper() for c in df.columns]
         
@@ -70,10 +108,13 @@ def _download_bhavcopy_for_date(trade_date: date) -> Optional[pd.DataFrame]:
         df = df.set_index(symbol_col)[["OPEN", "HIGH", "LOW", "CLOSE", "VOLUME"]]
         df = df.apply(pd.to_numeric, errors="coerce")
         
+        # Save to disk cache for future runs
+        df.to_parquet(disk_path)
+        
         _BHAVCOPY_CACHE[key] = df
         return df
     except Exception:
-        # Save a marker for missing data to avoid re-requesting empty weekends/holidays
+        # Parse error
         _BHAVCOPY_CACHE[key] = None
         return None
 
@@ -90,10 +131,15 @@ def fetch_daily_candles(symbol: str, as_of_date: date, lookback_days: int = 320)
 
     # 1. Pre-fetch all missing days in parallel to drastically speed up network I/O
     days_to_fetch = [as_of_date - timedelta(days=offset) for offset in range(lookback_days + 1)]
-    missing_days = [d for d in days_to_fetch if d.strftime("%Y-%m-%d") not in _BHAVCOPY_CACHE]
+    missing_days = []
+    for d in days_to_fetch:
+        key = d.strftime("%Y-%m-%d")
+        if key not in _BHAVCOPY_CACHE and not os.path.exists(os.path.join(_CACHE_DIR, f"{key}.parquet")) and not os.path.exists(os.path.join(_CACHE_DIR, f"{key}.missing")):
+            missing_days.append(d)
     
     if missing_days:
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        # Reduced max_workers to 3 to respect NSE rate limits during large historical lookbacks
+        with ThreadPoolExecutor(max_workers=3) as executor:
             list(executor.map(_download_bhavcopy_for_date, missing_days))
 
     # 2. Extract data sequentially (all requests will now instantly hit the RAM cache)
@@ -139,10 +185,15 @@ def fetch_daily_candles(symbol: str, as_of_date: date, lookback_days: int = 320)
 def fetch_bulk_history(symbols: List[str], end_date: date, lookback_days: int) -> Dict[str, pd.DataFrame]:
     """Highly optimized vectorized fetcher that returns history for multiple symbols in one pass."""
     days_to_fetch = [end_date - timedelta(days=offset) for offset in range(lookback_days + 1)]
-    missing_days = [d for d in days_to_fetch if d.strftime("%Y-%m-%d") not in _BHAVCOPY_CACHE]
+    missing_days = []
+    for d in days_to_fetch:
+        key = d.strftime("%Y-%m-%d")
+        if key not in _BHAVCOPY_CACHE and not os.path.exists(os.path.join(_CACHE_DIR, f"{key}.parquet")) and not os.path.exists(os.path.join(_CACHE_DIR, f"{key}.missing")):
+            missing_days.append(d)
     
     if missing_days:
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        # Reduced max_workers to 3 to respect NSE rate limits during large historical lookbacks
+        with ThreadPoolExecutor(max_workers=3) as executor:
             list(executor.map(_download_bhavcopy_for_date, missing_days))
             
     all_dfs = []

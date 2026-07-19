@@ -15,8 +15,9 @@ class BacktestEngine:
         self.start_date = start_date
         self.end_date = end_date
         
-        self.initial_capital = 10_00_000.0
-        self.max_allocation_per_trade = 0.10 # Max 10% of portfolio per trade
+        self.initial_capital = 1_00_000.0  # Targeted for 1 Lakh retail investor
+        self.max_allocation_per_trade = 0.15 # Max 15% of portfolio per trade
+        self.risk_per_trade_pct = 0.02       # Max 2% portfolio risk per trade
         
         self.trades = []
         self.equity_curve = []
@@ -24,16 +25,31 @@ class BacktestEngine:
     def pre_fetch_data(self):
         """Fetch data for all symbols to cover the backtest period + lookback."""
         print(f"Pre-fetching historical data for {len(self.symbols)} symbols...")
+        if "NIFTYBEES" not in self.symbols:
+            self.symbols.append("NIFTYBEES")
+            
         lookback = (self.end_date - self.start_date).days + 300
         
         self.history = fetch_bulk_history(self.symbols, self.end_date, lookback)
+        
+        # Calculate NIFTYBEES 50 SMA for Market Regime Filter
+        if "NIFTYBEES" in self.history:
+            nifty_df = self.history["NIFTYBEES"].copy()
+            nifty_df["SMA_50"] = nifty_df["Close"].rolling(50).mean()
+            self.history["NIFTYBEES"] = nifty_df
+            
         print("Data loaded and vectorized successfully!")
                 
     def _run_signal_generation(self):
         print(f"Generating signals for {self.strategy.name}...")
         self.signals = {} # date -> List[Signal]
         
+        nifty_df = self.history.get("NIFTYBEES", None)
+        
         for symbol, df in self.history.items():
+            if symbol == "NIFTYBEES":
+                continue # NIFTYBEES is only used for regime filtering
+                
             # Precalculate indicators for the entire history
             df = self.strategy.prepare_data(df)
             
@@ -45,6 +61,15 @@ class BacktestEngine:
                 if t_date_ts.date() > self.end_date:
                     break
                     
+                # Market Regime Check
+                market_is_bullish = True
+                if nifty_df is not None and t_date_ts in nifty_df.index:
+                    nifty_day = nifty_df.loc[t_date_ts]
+                    if isinstance(nifty_day, pd.DataFrame):
+                        nifty_day = nifty_day.iloc[0]
+                    if float(nifty_day["SMA_50"]) > 0 and float(nifty_day["Close"]) < float(nifty_day["SMA_50"]):
+                        market_is_bullish = False
+                    
                 # Instant O(1) slice
                 window_df = df.iloc[:i+1]
                     
@@ -52,6 +77,9 @@ class BacktestEngine:
                 try:
                     sig = self.strategy.analyze(temp_candles)
                     if sig:
+                        if sig.direction == "LONG" and not market_is_bullish:
+                            continue # Block LONG entries in a Bearish Market Regime
+                            
                         dt_str = t_date_ts.strftime("%Y-%m-%d")
                         if dt_str not in self.signals:
                             self.signals[dt_str] = []
@@ -94,6 +122,15 @@ class BacktestEngine:
                 low = float(day_data['Low'])
                 close = float(day_data['Close'])
                 
+                # Dynamic ATR Chandelier Trailing Stop
+                if high > pos.get('highest_high', 0.0):
+                    pos['highest_high'] = high
+                    atr = pos.get('entry_atr', 0.0)
+                    if atr > 0:
+                        new_sl = pos['highest_high'] - (3.0 * atr)
+                        if new_sl > pos['stop_loss']:
+                            pos['stop_loss'] = new_sl
+                            
                 exit_triggered = False
                 
                 # Check Stop Loss First (Pessimistic execution)
@@ -217,8 +254,24 @@ class BacktestEngine:
                     # Execute trade
                     exec_price = max(open_price, sig.entry_price) # If it gapped up, we buy at open
                     
-                    trade_alloc = min(portfolio_value * self.max_allocation_per_trade, current_cash)
-                    qty = int(trade_alloc // exec_price)
+                    # --- Advanced Volatility-Based Position Sizing ---
+                    # 1. Cap by Risk (Max 2% portfolio loss if SL is hit)
+                    max_risk_amount = portfolio_value * self.risk_per_trade_pct
+                    risk_per_share = exec_price - sig.stop_loss
+                    if risk_per_share <= 0:
+                        risk_per_share = exec_price * 0.01  # Fallback: assume 1% risk if SL is invalid/inverted
+                        
+                    qty_risk = int(max_risk_amount // risk_per_share)
+                    
+                    # 2. Cap by Max Allocation (Max 10% of portfolio size per trade)
+                    max_allocation_amount = portfolio_value * self.max_allocation_per_trade
+                    qty_alloc = int(max_allocation_amount // exec_price)
+                    
+                    # 3. Cap by Available Cash
+                    qty_cash = int(current_cash // exec_price)
+                    
+                    # Take the most conservative constraint
+                    qty = min(qty_risk, qty_alloc, qty_cash)
                     
                     if qty > 0:
                         cost = qty * exec_price
@@ -235,6 +288,8 @@ class BacktestEngine:
                             "entry_fee_per_share": entry_fee / qty,
                             "qty": qty,
                             "stop_loss": sig.stop_loss,
+                            "entry_atr": sig.metadata.get('ATR', 0.0),
+                            "highest_high": exec_price,
                             "target_1": t1_val,
                             "target_2": t2_val,
                             "trailing_ma": sig.metadata.get("trailing_ma", None),

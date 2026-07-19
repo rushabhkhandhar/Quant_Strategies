@@ -142,6 +142,7 @@ class MacdBbStrategy(BaseStrategy):
                 "bb_lower": round(lower, 2),
                 "bb_width_avg_pct": round(avg_width, 2),
                 "distance_to_band_pct": round(distance, 2),
+                "ATR": round(curr_atr, 2),
                 "Avg_Volume": int(avg_vol),
                 "Curr_Volume": int(curr_vol),
                 "rank_score": -distance # Prioritize closest to the band

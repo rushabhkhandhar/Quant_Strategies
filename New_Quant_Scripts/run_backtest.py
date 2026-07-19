@@ -53,7 +53,7 @@ def main():
     print("Loading Universe...")
     symbols = load_nifty500_symbols()
     
-    if strat_idx == "5":
+    if selected_strategy == "Ensemble_Portfolio":
         strategy_instances = [cls() for cls in STRATEGY_MAP.values()]
         engine = EnsembleBacktestEngine(strategy_instances, symbols, start_date, end_date)
     else:

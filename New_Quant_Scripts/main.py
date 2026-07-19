@@ -60,21 +60,45 @@ def run_screener(as_of_date: date):
         print(f"Failed to load Nifty 500 from web: {e}")
         return
 
+    # Always include NIFTYBEES for macro regime filter
+    if "NIFTYBEES" not in symbols:
+        symbols.append("NIFTYBEES")
+        
+    from data.nse_fetcher import fetch_bulk_history
+    print(f"Pre-fetching historical data for {len(symbols)} symbols...")
+    history = fetch_bulk_history(symbols, as_of_date, lookback_days=150)
+    
+    # 3. Check Market Regime
+    market_is_bullish = True
+    nifty_df = history.get("NIFTYBEES")
+    if nifty_df is not None and not nifty_df.empty:
+        nifty_df["SMA_50"] = nifty_df["Close"].rolling(50).mean()
+        latest_nifty = nifty_df.iloc[-1]
+        if float(latest_nifty["SMA_50"]) > 0 and float(latest_nifty["Close"]) < float(latest_nifty["SMA_50"]):
+            market_is_bullish = False
+            print("\n" + "!"*50)
+            print("WARNING: MARKET REGIME IS BEARISH")
+            print("NIFTY 50 is trading below its 50-Day Moving Average.")
+            print("LONG Breakout trades have a very high failure rate today!")
+            print("!"*50 + "\n")
+            
     print(f"Total symbols to process: {len(symbols)}")
     
-    # 3. Process each symbol exactly ONCE
+    # 4. Process each symbol
     for idx, symbol in enumerate(symbols):
         if idx % 50 == 0:
             print(f"Processing {idx}/{len(symbols)}...")
             
-        candles = fetch_daily_candles(symbol, as_of_date, lookback_days=300)
-        if not candles:
+        candles_df = history.get(symbol)
+        if candles_df is None or len(candles_df) < 50:
             continue
+            
+        candles = CandleSet(symbol=symbol, daily=candles_df)
             
         if not is_liquid(candles):
             continue
             
-        # 4. Pass the exact same dataset to EVERY strategy
+        # 5. Pass the exact same dataset to EVERY strategy
         for strategy in strategies:
             try:
                 # Give each strategy its own copy so indicators don't collide
@@ -82,6 +106,8 @@ def run_screener(as_of_date: date):
                 strat_candles.daily = strategy.prepare_data(strat_candles.daily)
                 signal = strategy.analyze(strat_candles)
                 if signal:
+                    if signal.direction == "LONG" and not market_is_bullish:
+                        continue # Skip generating LONG signals in bearish market
                     all_signals[strategy.name].append(signal)
             except Exception as e:
                 print(f"Error running {strategy.name} on {symbol}: {e}")

@@ -13,9 +13,10 @@ class EnsembleBacktestEngine:
         self.start_date = start_date
         self.end_date = end_date
         
-        self.initial_capital = 1_000_000.0
-        self.max_allocation_per_trade = 0.10
-        self.max_open_positions = 10
+        self.initial_capital = 1_00_000.0  # Targeted for 1 Lakh retail investor
+        self.max_allocation_per_trade = 0.15
+        self.risk_per_trade_pct = 0.02
+        self.max_open_positions = 6
         
         self.history: Dict[str, pd.DataFrame] = {}
         self.signals: Dict[str, Dict[str, List[Signal]]] = {s.name: {} for s in strategies}
@@ -32,48 +33,59 @@ class EnsembleBacktestEngine:
         
     def pre_fetch_data(self):
         # Ensure NIFTYBEES is fetched for the macro regime filter
-        symbols_to_fetch = list(set(self.symbols + ["NIFTYBEES"]))
-        print(f"Pre-fetching historical data for {len(symbols_to_fetch)} symbols...")
+        if "NIFTYBEES" not in self.symbols:
+            self.symbols.append("NIFTYBEES")
+        print(f"Pre-fetching historical data for {len(self.symbols)} symbols...")
         lookback = (self.end_date - self.start_date).days + 300
         
-        raw_history = fetch_bulk_history(symbols_to_fetch, self.end_date, lookback)
+        self.history = fetch_bulk_history(self.symbols, self.end_date, lookback)
         
-        print("Vectorizing indicators across all strategies...")
-        for symbol, df in raw_history.items():
-            for strategy in self.strategies:
-                df = strategy.prepare_data(df)
-            self.history[symbol] = df
-            
-        print("Loading NIFTYBEES Macro Regime Data...")
+        # Calculate NIFTYBEES 50 SMA for Market Regime Filter
         if "NIFTYBEES" in self.history:
-            nifty = self.history["NIFTYBEES"].copy()
-            nifty["EMA_50"] = nifty["Close"].ewm(span=50, adjust=False).mean()
-            self.nifty_history = nifty
-            print("Macro Regime Data loaded successfully!")
-        else:
-            print("Warning: NIFTYBEES not found in Bhavcopy data. Regime filter will be disabled.")
-            self.nifty_history = pd.DataFrame()
+            nifty_df = self.history["NIFTYBEES"].copy()
+            nifty_df["SMA_50"] = nifty_df["Close"].rolling(50).mean()
+            self.history["NIFTYBEES"] = nifty_df
             
-        print("Data loaded and fully vectorized successfully!")
+        print("Data loaded and vectorized successfully!")
 
     def _run_signal_generation(self):
-        print("Generating signals across all strategies...")
+        print(f"Generating signals for {len(self.strategies)} strategies...")
         
-        for symbol, df in self.history.items():
-            for i in range(49, len(df)):
-                t_date_ts = df.index[i]
-                if t_date_ts.date() < self.start_date:
-                    continue
-                if t_date_ts.date() > self.end_date:
-                    break
-                    
-                window_df = df.iloc[:i+1]
-                temp_candles = CandleSet(symbol=symbol, daily=window_df)
+        nifty_df = self.history.get("NIFTYBEES", None)
+        
+        for symbol, original_df in self.history.items():
+            if symbol == "NIFTYBEES":
+                continue # NIFTYBEES is only used for regime filtering
                 
-                for strategy in self.strategies:
+            for strategy in self.strategies:
+                # Precalculate indicators for the entire history for this specific strategy
+                df = strategy.prepare_data(original_df.copy())
+                
+                for i in range(49, len(df)): # Start at 49 to ensure at least 50 days of history
+                    t_date_ts = df.index[i]
+                    if t_date_ts.date() < self.start_date:
+                        continue
+                    if t_date_ts.date() > self.end_date:
+                        break
+                        
+                    # Market Regime Check
+                    market_is_bullish = True
+                    if nifty_df is not None and t_date_ts in nifty_df.index:
+                        nifty_day = nifty_df.loc[t_date_ts]
+                        if isinstance(nifty_day, pd.DataFrame):
+                            nifty_day = nifty_day.iloc[0]
+                        if float(nifty_day["SMA_50"]) > 0 and float(nifty_day["Close"]) < float(nifty_day["SMA_50"]):
+                            market_is_bullish = False
+                            
+                    window_df = df.iloc[:i+1]
+                    temp_candles = CandleSet(symbol=symbol, daily=window_df)
+                    
                     try:
                         sig = strategy.analyze(temp_candles)
                         if sig:
+                            if sig.direction == "LONG" and not market_is_bullish:
+                                continue # Block LONG entries in a Bearish Market Regime
+                                
                             dt_str = t_date_ts.strftime("%Y-%m-%d")
                             if dt_str not in self.signals[strategy.name]:
                                 self.signals[strategy.name][dt_str] = []
@@ -109,9 +121,20 @@ class EnsembleBacktestEngine:
                 day_data = self.history[symbol].loc[pd.Timestamp(t_date)]
                 if isinstance(day_data, pd.DataFrame): day_data = day_data.iloc[0]
                     
-                high, low, close = float(day_data['High']), float(day_data['Low']), float(day_data['Close'])
                 open_price = float(day_data['Open'])
+                high = float(day_data['High'])
+                low = float(day_data['Low'])
+                close = float(day_data['Close'])
                 
+                # Dynamic ATR Chandelier Trailing Stop
+                if high > pos.get('highest_high', 0.0):
+                    pos['highest_high'] = high
+                    atr = pos.get('entry_atr', 0.0)
+                    if atr > 0:
+                        new_sl = pos['highest_high'] - (3.0 * atr)
+                        if new_sl > pos['stop_loss']:
+                            pos['stop_loss'] = new_sl
+                            
                 exit_triggered = False
                 
                 if low <= pos['stop_loss']:
@@ -184,27 +207,9 @@ class EnsembleBacktestEngine:
                 
                 executed_symbols = set([p['symbol'] for p in open_positions])
                 
-                # Determine Market Regime
-                is_bull_market = True
-                if hasattr(self, 'nifty_history') and not self.nifty_history.empty:
-                    # Find closest previous Nifty date
-                    available_dates = self.nifty_history.index[self.nifty_history.index <= pd.Timestamp(t_date)]
-                    if len(available_dates) > 0:
-                        closest_date = available_dates[-1]
-                        nifty_row = self.nifty_history.loc[closest_date]
-                        if isinstance(nifty_row, pd.DataFrame): nifty_row = nifty_row.iloc[0]
-                        nifty_close = float(nifty_row["Close"])
-                        nifty_ema_50 = float(nifty_row["EMA_50"])
-                        if nifty_close < nifty_ema_50:
-                            is_bull_market = False
-                
                 for sig in todays_signals:
                     if len(open_positions) >= self.max_open_positions or current_cash <= 0:
                         break
-                        
-                    # Market Regime Filter: Block Trend/Breakout trades if market is bearish
-                    if not is_bull_market and sig.metadata.get("strategy_name") in ["VCP_Breakout", "Inside_Day_Squeeze", "Holy_Grail_Pullback"]:
-                        continue
                         
                     symbol = sig.symbol
                     if symbol in executed_symbols:
@@ -221,8 +226,24 @@ class EnsembleBacktestEngine:
                     
                     if high >= sig.entry_price:
                         exec_price = max(open_price, sig.entry_price)
-                        trade_alloc = min(portfolio_value * self.max_allocation_per_trade, current_cash)
-                        qty = int(trade_alloc // exec_price)
+                        # --- Advanced Volatility-Based Position Sizing ---
+                        # 1. Cap by Risk (Max 2% portfolio loss if SL is hit)
+                        max_risk_amount = portfolio_value * self.risk_per_trade_pct
+                        risk_per_share = exec_price - sig.stop_loss
+                        if risk_per_share <= 0:
+                            risk_per_share = exec_price * 0.01  # Fallback: assume 1% risk if SL is invalid/inverted
+                            
+                        qty_risk = int(max_risk_amount // risk_per_share)
+                        
+                        # 2. Cap by Max Allocation (Max 10% of portfolio size per trade)
+                        max_allocation_amount = portfolio_value * self.max_allocation_per_trade
+                        qty_alloc = int(max_allocation_amount // exec_price)
+                        
+                        # 3. Cap by Available Cash
+                        qty_cash = int(current_cash // exec_price)
+                        
+                        # Take the most conservative constraint
+                        qty = min(qty_risk, qty_alloc, qty_cash)
                         
                         if qty > 0:
                             cost = qty * exec_price
@@ -240,6 +261,8 @@ class EnsembleBacktestEngine:
                                 "entry_fee_per_share": entry_fee / qty,
                                 "qty": qty,
                                 "stop_loss": sig.stop_loss,
+                                "entry_atr": sig.metadata.get('ATR', 0.0),
+                                "highest_high": exec_price,
                                 "target_1": t1_val,
                                 "target_2": t2_val,
                                 "t1_hit": False,

@@ -67,18 +67,26 @@ def main():
         print("Backtest failed or no trades were taken.")
         return
         
-    print("\n" + "="*40)
-    print("        BACKTEST RESULTS")
-    print("="*40)
-    print(f"Total Trades Taken : {metrics['Total_Trades']}")
-    print(f"Win Rate           : {metrics['Win_Rate_%']}%")
-    print(f"Total Return       : {metrics['Total_Return_%']}%")
-    print(f"Final Equity       : ₹{metrics['Final_Equity']:,.2f}")
-    print(f"Max Drawdown (MDD) : {metrics['Max_Drawdown_%']}%")
-    print(f"Sharpe Ratio       : {metrics['Sharpe_Ratio']}")
-    print(f"Sortino Ratio      : {metrics['Sortino_Ratio']}")
-    print(f"Calmar Ratio       : {metrics['Calmar_Ratio']}")
-    print("="*40)
+    print("\n" + "="*45)
+    print("          BACKTEST RESULTS")
+    print("="*45)
+    print(f"  Positions Taken    : {metrics['Positions']}")
+    print(f"  Position Win Rate  : {metrics['Position_Win_Rate_%']}%")
+    print(f"  Profit Factor      : {metrics['Profit_Factor']}")
+    print(f"  Avg R-Multiple     : {metrics['Avg_R_Multiple']}")
+    print(f"  Expectancy/Position: ₹{metrics['Expectancy_Per_Position']:,.2f}")
+    print(f"  Avg Holding Days   : {metrics['Avg_Holding_Days']}")
+    print("-"*45)
+    print(f"  Total Return       : {metrics['Total_Return_%']}%")
+    print(f"  Annualized Return  : {metrics['Annualized_Return_%']}%")
+    print(f"  Final Equity       : ₹{metrics['Final_Equity']:,.2f}")
+    print(f"  Max Drawdown (MDD) : {metrics['Max_Drawdown_%']}%")
+    print(f"  Sharpe Ratio       : {metrics['Sharpe_Ratio']}")
+    print(f"  Sortino Ratio      : {metrics['Sortino_Ratio']}")
+    print(f"  Calmar Ratio       : {metrics['Calmar_Ratio']}")
+    print("-"*45)
+    print(f"  Exit Events        : {metrics['Exit_Events']}")
+    print("="*45)
     
     # Save Trade Log
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -100,7 +108,7 @@ def main():
         
     # Save Metrics Summary
     summary_path = os.path.join(out_dir, f"{selected_strategy}_metrics.csv")
-    summary_data = {k: v for k, v in metrics.items() if k not in ["Trade_Log", "Equity_Curve"]}
+    summary_data = {k: v for k, v in metrics.items() if k not in ["Trade_Log", "Equity_Curve", "Position_Log"]}
     pd.DataFrame([summary_data]).to_csv(summary_path, index=False)
     print(f"Saved metrics summary to: {summary_path}")
 

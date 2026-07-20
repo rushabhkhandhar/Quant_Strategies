@@ -61,11 +61,13 @@ class FibonacciBounceStrategy(BaseStrategy):
             prev_close < prev_open
             and curr_close > curr_open
             and curr_close > prev_open
+            and curr_open <= prev_close
         )
 
     def analyze(self, candles: CandleSet) -> Optional[Signal]:
         df = candles.daily
-        if len(df) < max(self.swing_lookback + 2, self.volume_lookback + 2):
+        # Require at least 200 rows to ensure the 200 EMA is accurate
+        if len(df) < max(200, self.swing_lookback + 25):
             return None
 
         # Ensure indicators are calculated
@@ -91,7 +93,8 @@ class FibonacciBounceStrategy(BaseStrategy):
 
         # Identify Swing
         window = df.iloc[-self.swing_lookback:]
-        high_idx = window["High"].idxmax()
+        # Reverse the window before calling idxmax() to get the most recent high in case of a double top
+        high_idx = window[::-1]["High"].idxmax()
         
         # Stale Swing Check: Ensure the swing high occurred within the last 20 trading days
         days_since_high = len(window.loc[high_idx:]) - 1
@@ -127,8 +130,9 @@ class FibonacciBounceStrategy(BaseStrategy):
         defends_50 = touched_50 and close_price >= (fib_50 * 0.995)
         defends_618 = touched_618 and close_price >= (fib_618 * 0.995)
 
-        near_50 = defends_50 or dist_50 <= self.near_level_pct
-        near_618 = defends_618 or dist_618 <= self.near_level_pct
+        # Require the close to be >= the support level minus a tiny buffer
+        near_50 = (defends_50 or dist_50 <= self.near_level_pct) and close_price >= (fib_50 * 0.995)
+        near_618 = (defends_618 or dist_618 <= self.near_level_pct) and close_price >= (fib_618 * 0.995)
         
         if not (near_50 or near_618):
             return None
@@ -151,8 +155,10 @@ class FibonacciBounceStrategy(BaseStrategy):
         # Calculate Risk and Levels
         entry_price = fib_50 if near_50 else fib_618
         
+        # Base the stop loss on the absolute low of the candlestick pattern
+        pattern_low = min(low_price, float(prev["Low"])) if pattern_name == "bullish_engulfing" else low_price
         # Stop loss with a 1% buffer below the 61.8% level for SL1 to avoid stop-hunts
-        stop_loss = min(low_price, fib_618 * 0.99)
+        stop_loss = min(pattern_low, fib_618 * 0.99)
         
         risk = entry_price - stop_loss
         if risk <= 0:

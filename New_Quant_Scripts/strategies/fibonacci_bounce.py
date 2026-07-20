@@ -32,6 +32,7 @@ class FibonacciBounceStrategy(BaseStrategy):
         self.min_swing_pct = 6.0
         self.hmm_window = 252
         self.meta_model = None
+        self.chandelier_multiplier = 2.5
 
     @property
     def name(self) -> str:
@@ -50,6 +51,13 @@ class FibonacciBounceStrategy(BaseStrategy):
             
         if "Volat_20" not in df.columns:
             df["Volat_20"] = df["Log_Return"].rolling(window=20).std()
+            
+        if "Parkinson_Vol_20" not in df.columns:
+            low_safe = df["Low"].replace(0, 1e-9)
+            daily_var = (np.log(df["High"] / low_safe))**2
+            rolling_sum = daily_var.rolling(window=20).sum()
+            variance_20 = rolling_sum * (1.0 / (4.0 * 20 * np.log(2)))
+            df["Parkinson_Vol_20"] = np.sqrt(variance_20.clip(lower=0.0))
             
         return df
 
@@ -288,10 +296,13 @@ class FibonacciBounceStrategy(BaseStrategy):
         # 7. Calculate Risk and Levels
         entry_price = fib_50 if near_50 else fib_618
         
-        # Base the stop loss on the absolute low of the candlestick pattern
-        pattern_low = min(low_price, float(prev["Low"])) if pattern_name == "bullish_engulfing" else low_price
-        # Stop loss with a 1% buffer below the 61.8% level for SL1 to avoid stop-hunts
-        stop_loss = min(pattern_low, fib_618 * 0.99)
+        # Dynamic Initial Stop-Loss using Chandelier Exit logic
+        current_parkinson_vol = float(df["Parkinson_Vol_20"].iloc[-1])
+        if pd.isna(current_parkinson_vol):
+            current_parkinson_vol = 0.0
+            
+        chandelier_distance = self.chandelier_multiplier * current_parkinson_vol
+        stop_loss = entry_price - chandelier_distance
         
         risk = entry_price - stop_loss
         if risk <= 0:
@@ -329,9 +340,15 @@ class FibonacciBounceStrategy(BaseStrategy):
                 "Target_3": round(target_3, 2),
                 "Avg_Volume": int(prev_avg_vol),
                 "Curr_Volume": int(curr_vol),
-                "rank_score": -dist_50 if near_50 else -dist_618
+                "rank_score": -dist_50 if near_50 else -dist_618,
+                "Parkinson_Vol_20": round(current_parkinson_vol, 6),
+                "Chandelier_Distance": round(chandelier_distance, 4)
             }
         )
+        
+        # Note for Backtester/Execution Engine:
+        # The execution engine should trail this stop-loss by tracking the Highest High 
+        # during the trade and subtracting (self.chandelier_multiplier * Parkinson_Vol_20).
 
         if getattr(self, 'meta_model', None) is not None:
             features = self._extract_features(df, df.index[-1])

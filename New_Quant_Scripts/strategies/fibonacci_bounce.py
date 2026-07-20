@@ -1,19 +1,25 @@
 from typing import Optional, Dict, Any
 import pandas as pd
+import numpy as np
+from hmmlearn.hmm import GaussianHMM
+import warnings
+
+# Suppress hmmlearn warnings for clean output
+warnings.filterwarnings("ignore", category=UserWarning, module="hmmlearn")
 
 from core.models import CandleSet, Signal
 from strategies.base import BaseStrategy
 
 class FibonacciBounceStrategy(BaseStrategy):
     """
-    Fibonacci Retracement + Candlestick + Volume Strategy.
+    Fibonacci Retracement + Candlestick + Volume Strategy + HMM Regime Filter.
     
     Rules:
     1) Build Fib from recent swing low to swing high (60-day window).
-    2) Current candle is near 50% or 61.8% retracement zone (within 1.2%).
+    2) Current candle is near 50% or 61.8% retracement zone.
     3) Bullish candlestick confirmation (Hammer or Bullish Engulfing).
-    4) Current volume is above average volume (spike >= 1.2x 20-day avg).
-    5) Macro Trend: Price > 200 EMA.
+    4) Current volume is above average volume.
+    5) Macro Trend: HMM identifies current market regime as Bull/Calm.
     """
     
     def __init__(self):
@@ -21,19 +27,50 @@ class FibonacciBounceStrategy(BaseStrategy):
         self.swing_lookback = 60
         self.near_level_pct = 1.2
         self.volume_lookback = 20
-        self.volume_multiplier = 1.0  # Relaxed from 1.2
+        self.volume_multiplier = 1.0  
         self.min_swing_pct = 6.0
+        self.hmm_window = 252
 
     @property
     def name(self) -> str:
         return "Fibonacci_Bounce"
 
     def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        if "EMA_50" not in df.columns:
-            df["EMA_50"] = df["Close"].ewm(span=50, adjust=False).mean()
         if "VOL_20" not in df.columns:
             df["VOL_20"] = df["Volume"].rolling(window=20).mean()
+        
+        if "Log_Return" not in df.columns:
+            # Calculate daily logarithmic returns
+            df["Log_Return"] = np.log(df["Close"] / df["Close"].shift(1))
+            
         return df
+
+    def _get_current_regime(self, df: pd.DataFrame) -> str:
+        returns = df["Log_Return"].dropna()
+        if len(returns) < 20: 
+            return "Unknown"
+            
+        window_returns = returns.iloc[-self.hmm_window:]
+        X = window_returns.values.reshape(-1, 1)
+        
+        # Fit a 2-state GaussianHMM
+        model = GaussianHMM(n_components=2, covariance_type="full", n_iter=100, random_state=42)
+        try:
+            model.fit(X)
+            hidden_states = model.predict(X)
+        except Exception:
+            return "Unknown"
+            
+        # Dynamically identify high-volatility vs low-volatility states
+        variances = np.array([np.diag(model.covars_[i]) for i in range(2)])
+        high_vol_state = np.argmax(variances)
+        
+        current_state = hidden_states[-1]
+        
+        if current_state == high_vol_state:
+            return "Bear/High_Vol"
+        else:
+            return "Bull/Calm"
 
     def _bullish_hammer(self, candle: pd.Series) -> bool:
         open_price = float(candle["Open"])
@@ -66,15 +103,12 @@ class FibonacciBounceStrategy(BaseStrategy):
 
     def analyze(self, candles: CandleSet) -> Optional[Signal]:
         df = candles.daily
-        # Require at least 50 rows to ensure the 50 EMA is accurate
         if len(df) < max(50, self.swing_lookback + 25):
             return None
 
         # Ensure indicators are calculated
         df = self.prepare_data(df)
         
-        # Macro Trend Filter: Ensure stock is in a general uptrend (Close > 50 EMA)
-        ema_50 = float(df["EMA_50"].iloc[-1])
         curr = df.iloc[-1]
         prev = df.iloc[-2]
         
@@ -83,17 +117,18 @@ class FibonacciBounceStrategy(BaseStrategy):
         high_price = float(curr["High"])
         curr_vol = float(curr["Volume"])
         
-        if close_price < ema_50:
+        # 1. HMM Regime Filter
+        current_regime = self._get_current_regime(df)
+        if current_regime == "Bear/High_Vol" or current_regime == "Unknown":
             return None
 
-        # Liquidity Filter (Approx 70 Cr)
+        # 2. Liquidity Filter (Approx 70 Cr)
         avg_vol = float(df["VOL_20"].iloc[-1])
         if (avg_vol * close_price) < 70_000_000:
             return None
 
-        # Identify Swing
+        # 3. Identify Swing
         window = df.iloc[-self.swing_lookback:]
-        # Reverse the window before calling idxmax() to get the most recent high in case of a double top
         high_idx = window[::-1]["High"].idxmax()
         
         # Stale Swing Check: Ensure the swing high occurred within the last 20 trading days
@@ -116,7 +151,7 @@ class FibonacciBounceStrategy(BaseStrategy):
         if swing_pct < self.min_swing_pct:
             return None
 
-        # Fibonacci Levels
+        # 4. Fibonacci Levels
         fib_382 = swing_high - 0.382 * (swing_high - swing_low)
         fib_50 = swing_high - 0.500 * (swing_high - swing_low)
         fib_618 = swing_high - 0.618 * (swing_high - swing_low)
@@ -137,7 +172,7 @@ class FibonacciBounceStrategy(BaseStrategy):
         if not (near_50 or near_618):
             return None
 
-        # Candlestick Pattern
+        # 5. Candlestick Pattern
         pattern_name = ""
         if self._bullish_engulfing(prev, curr):
             pattern_name = "bullish_engulfing"
@@ -146,13 +181,13 @@ class FibonacciBounceStrategy(BaseStrategy):
         else:
             return None
 
-        # Volume Spike (Compared to PREVIOUS 20 days average)
+        # 6. Volume Spike
         prev_avg_vol = float(df["VOL_20"].iloc[-2])
         if prev_avg_vol > 0:
             if curr_vol < (self.volume_multiplier * prev_avg_vol):
                 return None
         
-        # Calculate Risk and Levels
+        # 7. Calculate Risk and Levels
         entry_price = fib_50 if near_50 else fib_618
         
         # Base the stop loss on the absolute low of the candlestick pattern
@@ -164,11 +199,9 @@ class FibonacciBounceStrategy(BaseStrategy):
         if risk <= 0:
             return None
 
-        # Original Target Logic (Strictly mirroring standalone script)
         target_1 = fib_382
         target_2 = swing_high
 
-        # Legacy variables for metadata output
         range_size = max(swing_high - swing_low, 1e-9)
         stop_loss_2 = swing_low
         stop_loss_3 = swing_low - 0.25 * range_size
@@ -182,6 +215,7 @@ class FibonacciBounceStrategy(BaseStrategy):
             stop_loss=stop_loss,
             targets={"Target_1": target_1, "Target_2": target_2},
             metadata={
+                "Regime": current_regime,
                 "Close": round(close_price, 2),
                 "Swing_Low": round(swing_low, 2),
                 "Swing_High": round(swing_high, 2),
@@ -197,6 +231,6 @@ class FibonacciBounceStrategy(BaseStrategy):
                 "Target_3": round(target_3, 2),
                 "Avg_Volume": int(prev_avg_vol),
                 "Curr_Volume": int(curr_vol),
-                "rank_score": -dist_50 if near_50 else -dist_618 # Used by screener to sort
+                "rank_score": -dist_50 if near_50 else -dist_618
             }
         )

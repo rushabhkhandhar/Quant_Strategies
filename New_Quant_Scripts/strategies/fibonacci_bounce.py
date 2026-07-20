@@ -21,7 +21,7 @@ class FibonacciBounceStrategy(BaseStrategy):
         self.swing_lookback = 60
         self.near_level_pct = 1.2
         self.volume_lookback = 20
-        self.volume_multiplier = 1.2
+        self.volume_multiplier = 1.0  # Relaxed from 1.2
         self.min_swing_pct = 6.0
 
     @property

@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from hmmlearn.hmm import GaussianHMM
 import warnings
+from xgboost import XGBClassifier
 
 # Suppress hmmlearn warnings for clean output
 warnings.filterwarnings("ignore", category=UserWarning, module="hmmlearn")
@@ -30,6 +31,7 @@ class FibonacciBounceStrategy(BaseStrategy):
         self.volume_multiplier = 1.0  
         self.min_swing_pct = 6.0
         self.hmm_window = 252
+        self.meta_model = None
 
     @property
     def name(self) -> str:
@@ -42,6 +44,12 @@ class FibonacciBounceStrategy(BaseStrategy):
         if "Log_Return" not in df.columns:
             # Calculate daily logarithmic returns
             df["Log_Return"] = np.log(df["Close"] / df["Close"].shift(1))
+            
+        if "EMA_50" not in df.columns:
+            df["EMA_50"] = df["Close"].ewm(span=50, adjust=False).mean()
+            
+        if "Volat_20" not in df.columns:
+            df["Volat_20"] = df["Log_Return"].rolling(window=20).std()
             
         return df
 
@@ -100,6 +108,96 @@ class FibonacciBounceStrategy(BaseStrategy):
             and curr_close > prev_open
             and curr_open <= prev_close
         )
+
+    def _apply_triple_barrier(self, df: pd.DataFrame, entry_idx: Any, entry_price: float, target_price: float, stop_loss: float, max_holding_days: int = 10) -> int:
+        if entry_idx not in df.index:
+            return 0
+        int_idx = df.index.get_loc(entry_idx)
+        if int_idx + 1 >= len(df):
+            return 0
+        
+        future_df = df.iloc[int_idx + 1 : int_idx + 1 + max_holding_days]
+        for idx, row in future_df.iterrows():
+            if row['High'] >= target_price:
+                return 1
+            if row['Low'] <= stop_loss:
+                return 0
+        return 0
+
+    def _extract_features(self, df: pd.DataFrame, idx: Any) -> dict:
+        if idx not in df.index:
+            sub_df = df
+            row = df.iloc[-1]
+        else:
+            int_idx = df.index.get_loc(idx)
+            sub_df = df.iloc[:int_idx + 1]
+            row = sub_df.iloc[-1]
+            
+        volatility_20 = row.get("Volat_20", 0)
+        vol_20 = row.get("VOL_20", 1e-9)
+        volume_ratio = row["Volume"] / vol_20 if vol_20 > 0 else 1.0
+        
+        ema_50 = row.get("EMA_50", row["Close"])
+        dist_to_ema50 = ((row["Close"] - ema_50) / ema_50) * 100 if ema_50 > 0 else 0
+        
+        window = sub_df.iloc[-self.swing_lookback:]
+        swing_size_pct = 0.0
+        if len(window) > 0:
+            high_idx = window[::-1]["High"].idxmax()
+            prefix = window.loc[:high_idx]
+            if len(prefix) >= 2:
+                low_idx = prefix["Low"].idxmin()
+                swing_high = float(window.loc[high_idx, "High"])
+                swing_low = float(prefix.loc[low_idx, "Low"])
+                swing_size_pct = ((swing_high - swing_low) / swing_low) * 100.0 if swing_low > 0 else 0.0
+                
+        return {
+            "volatility_20": float(volatility_20),
+            "volume_ratio": float(volume_ratio),
+            "dist_to_ema50": float(dist_to_ema50),
+            "swing_size_pct": float(swing_size_pct)
+        }
+
+    def train_meta_model(self, historical_data: pd.DataFrame):
+        df = self.prepare_data(historical_data.copy())
+        
+        X = []
+        y = []
+        
+        min_days = max(50, self.swing_lookback + 25)
+        for i in range(min_days, len(df)):
+            sub_df = df.iloc[:i]
+            current_date = sub_df.index[-1]
+            
+            candle_set = CandleSet(symbol="TRAIN", daily=sub_df)
+            signal = self.analyze(candle_set)
+            
+            if signal is not None:
+                features = self._extract_features(df, current_date)
+                label = self._apply_triple_barrier(
+                    df=df,
+                    entry_idx=current_date,
+                    entry_price=signal.entry_price,
+                    target_price=signal.targets.get("Target_1", signal.entry_price * 1.1),
+                    stop_loss=signal.stop_loss,
+                    max_holding_days=10
+                )
+                
+                X.append([
+                    features["volatility_20"],
+                    features["volume_ratio"],
+                    features["dist_to_ema50"],
+                    features["swing_size_pct"]
+                ])
+                y.append(label)
+                
+        if len(X) > 10 and len(set(y)) > 1:
+            X_arr = np.array(X)
+            y_arr = np.array(y)
+            self.meta_model = XGBClassifier(n_estimators=100, max_depth=3, random_state=42)
+            self.meta_model.fit(X_arr, y_arr)
+        else:
+            self.meta_model = None
 
     def analyze(self, candles: CandleSet) -> Optional[Signal]:
         df = candles.daily
@@ -207,7 +305,7 @@ class FibonacciBounceStrategy(BaseStrategy):
         stop_loss_3 = swing_low - 0.25 * range_size
         target_3 = swing_high + 0.272 * range_size
 
-        return Signal(
+        sig = Signal(
             symbol=candles.symbol,
             date=candles.latest_date.strftime("%d/%m/%Y"),
             direction="LONG",
@@ -234,3 +332,21 @@ class FibonacciBounceStrategy(BaseStrategy):
                 "rank_score": -dist_50 if near_50 else -dist_618
             }
         )
+
+        if getattr(self, 'meta_model', None) is not None:
+            features = self._extract_features(df, df.index[-1])
+            X_pred = np.array([[
+                features["volatility_20"],
+                features["volume_ratio"],
+                features["dist_to_ema50"],
+                features["swing_size_pct"]
+            ]])
+            prob = self.meta_model.predict_proba(X_pred)[0]
+            prob_1 = prob[1] if len(prob) > 1 else 0.0
+            
+            if prob_1 < 0.65:
+                return None
+                
+            sig.metadata["ML_Probability"] = round(float(prob_1), 4)
+
+        return sig

@@ -5,8 +5,12 @@ from hmmlearn.hmm import GaussianHMM
 import warnings
 from xgboost import XGBClassifier
 
-# Suppress hmmlearn warnings for clean output
-warnings.filterwarnings("ignore", category=UserWarning, module="hmmlearn")
+# Suppress all warnings from hmmlearn (including RuntimeWarning for convergence issues)
+import warnings
+import logging
+warnings.filterwarnings("ignore", module="hmmlearn")
+warnings.filterwarnings("ignore", message=".*attribute is set.*")
+logging.getLogger("hmmlearn").setLevel(logging.ERROR)
 
 from core.models import CandleSet, Signal
 from strategies.base import BaseStrategy
@@ -64,34 +68,45 @@ class FibonacciBounceStrategy(BaseStrategy):
             variance_20 = rolling_sum * (1.0 / (4.0 * 20 * np.log(2)))
             df["Parkinson_Vol_20"] = np.sqrt(variance_20.clip(lower=0.0))
             
-        return df
+        if "HMM_Regime" not in df.columns:
+            df["HMM_Regime"] = "Unknown"
+            returns_array = df["Log_Return"].fillna(0).values
+            hmm_regimes = np.array(["Unknown"] * len(df), dtype=object)
+            
+            is_fitted = False
+            high_vol_state = 0
+            model = None
+            
+            for i in range(self.hmm_window, len(df)):
+                # Fit the model every 63 trading days (approx 1 quarter)
+                if i == self.hmm_window or i % 63 == 0:
+                    window_returns = returns_array[i - self.hmm_window : i].reshape(-1, 1)
+                    try:
+                        # Instantiate a fresh model to prevent initialization overwrite warnings
+                        model = GaussianHMM(n_components=2, covariance_type="full", n_iter=100, random_state=42)
+                        model.fit(window_returns)
+                        variances = np.array([np.diag(model.covars_[j]) for j in range(2)])
+                        high_vol_state = np.argmax(variances)
+                        is_fitted = True
+                    except Exception:
+                        is_fitted = False
+                
+                if is_fitted:
+                    # Predict the regime for the *current* day using the last hmm_window days
+                    current_window = returns_array[i - self.hmm_window + 1 : i + 1].reshape(-1, 1)
+                    try:
+                        hidden_states = model.predict(current_window)
+                        current_state = hidden_states[-1]
+                        if current_state == high_vol_state:
+                            hmm_regimes[i] = "Bear/High_Vol"
+                        else:
+                            hmm_regimes[i] = "Bull/Calm"
+                    except Exception:
+                        pass
+                        
+            df["HMM_Regime"] = hmm_regimes
 
-    def _get_current_regime(self, df: pd.DataFrame) -> str:
-        returns = df["Log_Return"].dropna()
-        if len(returns) < 20: 
-            return "Unknown"
-            
-        window_returns = returns.iloc[-self.hmm_window:]
-        X = window_returns.values.reshape(-1, 1)
-        
-        # Fit a 2-state GaussianHMM
-        model = GaussianHMM(n_components=2, covariance_type="full", n_iter=100, random_state=42)
-        try:
-            model.fit(X)
-            hidden_states = model.predict(X)
-        except Exception:
-            return "Unknown"
-            
-        # Dynamically identify high-volatility vs low-volatility states
-        variances = np.array([np.diag(model.covars_[i]) for i in range(2)])
-        high_vol_state = np.argmax(variances)
-        
-        current_state = hidden_states[-1]
-        
-        if current_state == high_vol_state:
-            return "Bear/High_Vol"
-        else:
-            return "Bull/Calm"
+        return df
 
     def _bullish_hammer(self, candle: pd.Series) -> bool:
         open_price = float(candle["Open"])
@@ -229,7 +244,7 @@ class FibonacciBounceStrategy(BaseStrategy):
         curr_vol = float(curr["Volume"])
         
         # 1. HMM Regime Filter
-        current_regime = self._get_current_regime(df)
+        current_regime = str(df["HMM_Regime"].iloc[-1])
         if current_regime == "Bear/High_Vol" or current_regime == "Unknown":
             return None
 

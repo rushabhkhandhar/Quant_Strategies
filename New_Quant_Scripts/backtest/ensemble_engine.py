@@ -58,6 +58,11 @@ class EnsembleBacktestEngine:
                 continue # NIFTYBEES is only used for regime filtering
                 
             for strategy in self.strategies:
+                # If the strategy has a meta-labeling model, train it on the symbol's full history first
+                if hasattr(strategy, 'train_meta_model'):
+                    print(f"[{symbol}] Training ML Meta-Model for {strategy.name}...")
+                    strategy.train_meta_model(original_df)
+                    
                 # Precalculate indicators for the entire history for this specific strategy
                 df = strategy.prepare_data(original_df.copy())
                 

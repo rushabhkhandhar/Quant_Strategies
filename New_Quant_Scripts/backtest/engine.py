@@ -74,6 +74,11 @@ class BacktestEngine:
             if symbol == "NIFTYBEES":
                 continue # NIFTYBEES is only used for regime filtering
                 
+            # If the strategy has a meta-labeling model, train it on the symbol's full history first
+            if hasattr(self.strategy, 'train_meta_model'):
+                print(f"[{symbol}] Training ML Meta-Model...")
+                self.strategy.train_meta_model(df)
+                
             # Precalculate indicators for the entire history
             df = self.strategy.prepare_data(df)
             

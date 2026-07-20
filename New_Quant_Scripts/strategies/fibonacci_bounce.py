@@ -29,8 +29,8 @@ class FibonacciBounceStrategy(BaseStrategy):
         return "Fibonacci_Bounce"
 
     def prepare_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        if "EMA_200" not in df.columns:
-            df["EMA_200"] = df["Close"].ewm(span=200, adjust=False).mean()
+        if "EMA_50" not in df.columns:
+            df["EMA_50"] = df["Close"].ewm(span=50, adjust=False).mean()
         if "VOL_20" not in df.columns:
             df["VOL_20"] = df["Volume"].rolling(window=20).mean()
         return df
@@ -66,15 +66,15 @@ class FibonacciBounceStrategy(BaseStrategy):
 
     def analyze(self, candles: CandleSet) -> Optional[Signal]:
         df = candles.daily
-        # Require at least 200 rows to ensure the 200 EMA is accurate
-        if len(df) < max(200, self.swing_lookback + 25):
+        # Require at least 50 rows to ensure the 50 EMA is accurate
+        if len(df) < max(50, self.swing_lookback + 25):
             return None
 
         # Ensure indicators are calculated
         df = self.prepare_data(df)
         
-        # Macro Trend Filter: Ensure stock is in a general uptrend (Close > 200 EMA)
-        ema_200 = float(df["EMA_200"].iloc[-1])
+        # Macro Trend Filter: Ensure stock is in a general uptrend (Close > 50 EMA)
+        ema_50 = float(df["EMA_50"].iloc[-1])
         curr = df.iloc[-1]
         prev = df.iloc[-2]
         
@@ -83,7 +83,7 @@ class FibonacciBounceStrategy(BaseStrategy):
         high_price = float(curr["High"])
         curr_vol = float(curr["Volume"])
         
-        if close_price < ema_200:
+        if close_price < ema_50:
             return None
 
         # Liquidity Filter (Approx 70 Cr)

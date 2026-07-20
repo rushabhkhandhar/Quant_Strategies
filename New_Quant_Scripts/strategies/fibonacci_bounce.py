@@ -33,6 +33,8 @@ class FibonacciBounceStrategy(BaseStrategy):
         self.hmm_window = 252
         self.meta_model = None
         self.chandelier_multiplier = 2.5
+        self.target_annual_volatility = 0.15
+        self.max_leverage = 2.0
 
     @property
     def name(self) -> str:
@@ -51,6 +53,9 @@ class FibonacciBounceStrategy(BaseStrategy):
             
         if "Volat_20" not in df.columns:
             df["Volat_20"] = df["Log_Return"].rolling(window=20).std()
+            
+        if "Annualized_Vol_20" not in df.columns:
+            df["Annualized_Vol_20"] = df["Volat_20"] * np.sqrt(252)
             
         if "Parkinson_Vol_20" not in df.columns:
             low_safe = df["Low"].replace(0, 1e-9)
@@ -308,6 +313,14 @@ class FibonacciBounceStrategy(BaseStrategy):
         if risk <= 0:
             return None
 
+        # Calculate Volatility Target Position Sizing
+        current_annualized_vol = float(df["Annualized_Vol_20"].iloc[-1])
+        if pd.isna(current_annualized_vol) or current_annualized_vol <= 0:
+            current_annualized_vol = 1e-9
+            
+        vol_target_multiplier = self.target_annual_volatility / current_annualized_vol
+        vol_target_multiplier = max(0.2, min(vol_target_multiplier, self.max_leverage))
+
         target_1 = fib_382
         target_2 = swing_high
 
@@ -342,13 +355,17 @@ class FibonacciBounceStrategy(BaseStrategy):
                 "Curr_Volume": int(curr_vol),
                 "rank_score": -dist_50 if near_50 else -dist_618,
                 "Parkinson_Vol_20": round(current_parkinson_vol, 6),
-                "Chandelier_Distance": round(chandelier_distance, 4)
+                "Chandelier_Distance": round(chandelier_distance, 4),
+                "Annualized_Vol_20": round(current_annualized_vol, 4),
+                "Position_Multiplier": round(vol_target_multiplier, 4)
             }
         )
         
         # Note for Backtester/Execution Engine:
-        # The execution engine should trail this stop-loss by tracking the Highest High 
-        # during the trade and subtracting (self.chandelier_multiplier * Parkinson_Vol_20).
+        # 1. The execution engine should trail this stop-loss by tracking the Highest High 
+        #    during the trade and subtracting (self.chandelier_multiplier * Parkinson_Vol_20).
+        # 2. The execution engine should multiply the standard baseline risk allocation 
+        #    by Position_Multiplier when executing the trade.
 
         if getattr(self, 'meta_model', None) is not None:
             features = self._extract_features(df, df.index[-1])
